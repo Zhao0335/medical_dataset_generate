@@ -291,23 +291,74 @@ The response must be at least 15 characters and show clear mental state reflecti
         dialogue_history: List[DialogueTurn],
         context: Dict[str, Any]
     ) -> str:
+        import random
+        
         last_doctor_msg = ""
         for turn in reversed(dialogue_history):
             if turn.role == "assistant":
                 last_doctor_msg = turn.content
                 break
         
+        used_responses = set()
+        for turn in dialogue_history:
+            if turn.role == "user":
+                used_responses.add(turn.content)
+        
+        patient_info = context.get("patient_info", {})
+        chief_complaint = patient_info.get("chief_complaint", "health concerns")
+        
+        symptom_responses = [
+            f"I've been dealing with {chief_complaint} for about a week now. It comes and goes, but seems worse in the mornings.",
+            f"The {chief_complaint} started about 3-4 days ago. At first it was mild, but now it's becoming more noticeable.",
+            f"I've noticed this issue for about two weeks. It's not constant, but it happens often enough to concern me.",
+            f"It started gradually over the past few days. I thought it would go away on its own, but it hasn't.",
+            f"I've had this for about a week. Some days are better than others, but overall it's been bothering me."
+        ]
+        
+        medication_responses = [
+            "I've been trying to take my medications regularly, but sometimes I miss a dose. I haven't noticed much improvement.",
+            "I take my medications as prescribed, usually in the morning. I'm wondering if there are any side effects I should watch for.",
+            "I'm currently on a few medications. I try to be consistent, but it's hard to remember sometimes.",
+            "I've been taking the medication for about a month now. I think it helps a little, but I'm not sure."
+        ]
+        
+        history_responses = [
+            "I don't have any major medical conditions that I'm aware of. My family has a history of diabetes and high blood pressure.",
+            "I've been generally healthy. I had surgery a few years ago, but nothing recent. No known allergies.",
+            "I have some ongoing conditions that I manage with medication. I can give you the details if that would help.",
+            "My medical history is pretty straightforward. I see my primary care doctor regularly for checkups."
+        ]
+        
+        general_responses = [
+            f"I'm here because of {chief_complaint}. It's been worrying me, and I wanted to get it checked out.",
+            f"The main reason I came in is {chief_complaint}. I'm hoping to understand what's causing it.",
+            f"I've been experiencing {chief_complaint}. Can you help me figure out what might be going on?",
+            f"My primary concern is {chief_complaint}. I'd really like to know if it's something serious."
+        ]
+        
+        explanation_responses = [
+            "Thank you for explaining. I'm still a bit confused about what this means for my daily life. Can you clarify?",
+            "I appreciate the information. What should I expect going forward? Are there things I need to avoid?",
+            "That helps me understand better. How long do you think it will take to see improvement?",
+            "Thanks for the explanation. Should I be concerned about any warning signs to watch for?"
+        ]
+        
         if "?" in last_doctor_msg:
             if "symptom" in last_doctor_msg.lower() or "症状" in last_doctor_msg:
-                return "I've been experiencing some discomfort for a few days now. It started gradually and seems to get worse with activity."
+                candidates = [r for r in symptom_responses if r not in used_responses]
+                return random.choice(candidates) if candidates else symptom_responses[0]
             elif "medication" in last_doctor_msg.lower() or "药" in last_doctor_msg:
-                return "I've been taking the medications as prescribed, but I'm not sure if they're helping. Sometimes I forget the evening dose."
+                candidates = [r for r in medication_responses if r not in used_responses]
+                return random.choice(candidates) if candidates else medication_responses[0]
             elif "history" in last_doctor_msg.lower() or "病史" in last_doctor_msg:
-                return "I don't have any major medical history that I know of. My father had some heart issues, if that's relevant."
+                candidates = [r for r in history_responses if r not in used_responses]
+                return random.choice(candidates) if candidates else history_responses[0]
             else:
-                return "I appreciate you asking. I've been concerned about this for a while now. Can you help me understand what might be going on?"
+                candidates = [r for r in general_responses if r not in used_responses]
+                return random.choice(candidates) if candidates else general_responses[0]
         else:
-            return "Thank you for explaining that. I'm still a bit unclear about what this means for me. Could you help me understand what I should do next?"
+            candidates = [r for r in explanation_responses if r not in used_responses]
+            return random.choice(candidates) if candidates else explanation_responses[0]
     
     def get_response_history(self) -> List[str]:
         return self.response_history.copy()

@@ -246,20 +246,105 @@ Do NOT include meta-commentary or explanations of your reasoning.
         dialogue_history: List[DialogueTurn],
         task_type: str
     ) -> str:
+        import random
+        
         last_patient_msg = ""
         for turn in reversed(dialogue_history):
             if turn.role == "user":
                 last_patient_msg = turn.content
                 break
         
+        used_responses = set()
+        for turn in dialogue_history:
+            if turn.role == "assistant":
+                used_responses.add(turn.content)
+        
         if task_type == TaskType.DIAGNOSIS.value:
             if not last_patient_msg:
                 return "Hello, I understand you're here for a consultation. Can you tell me what brings you in today?"
-            return "Thank you for sharing that. Can you tell me more about when these symptoms started and how severe they are?"
+            
+            diagnosis_questions = [
+                "Thank you for sharing that. Can you tell me more about when these symptoms started and how severe they are?",
+                "I appreciate that information. How long have you been experiencing this? Is it constant or does it come and go?",
+                "That's helpful to know. On a scale of 1 to 10, how would you rate the severity? What makes it better or worse?",
+                "I see. Have you noticed any patterns with your symptoms? Are there specific times of day when it's worse?",
+                "Thank you for describing that. Have you experienced any other symptoms along with this, like fever or fatigue?",
+                "I understand. Have you tried anything to relieve the symptoms? Did it help?",
+                "That's important information. Do you have any existing medical conditions or take any medications regularly?"
+            ]
+            
+            candidates = [q for q in diagnosis_questions if q not in used_responses]
+            return random.choice(candidates) if candidates else diagnosis_questions[0]
+            
         elif task_type == TaskType.MEDRECON.value:
-            return "Let's review your current medications. Can you tell me what medications you're currently taking and how you're taking them?"
+            medrecon_questions = [
+                "Let's review your current medications. Can you tell me what medications you're currently taking and how you're taking them?",
+                "I'd like to go over your medication list. What prescriptions are you on, and are you taking them as directed?",
+                "Can you walk me through your daily medication routine? Are there any you've missed or had trouble with?",
+                "I want to make sure we have your complete medication list. What do you take regularly, including over-the-counter medications?"
+            ]
+            
+            candidates = [q for q in medrecon_questions if q not in used_responses]
+            return random.choice(candidates) if candidates else medrecon_questions[0]
+            
         else:
-            return "Based on what we've discussed, let me explain the treatment options available to you."
+            prescription_responses = [
+                "Based on what we've discussed, let me explain the treatment options available to you.",
+                "Given your condition, I'd like to recommend a treatment plan. Let me explain the options.",
+                "I think we have a good understanding of your situation now. Here's what I recommend for treatment.",
+                "Based on our discussion, I'd like to prescribe some medication. Let me explain what it does and how to take it."
+            ]
+            
+            candidates = [r for r in prescription_responses if r not in used_responses]
+            return random.choice(candidates) if candidates else prescription_responses[0]
+    
+    def _check_dialogue_repetition(
+        self,
+        dialogue: List[DialogueTurn],
+        new_content: str,
+        role: str
+    ) -> bool:
+        if len(dialogue) < 2:
+            return False
+        
+        same_role_contents = [
+            turn.content for turn in dialogue 
+            if turn.role == role
+        ]
+        
+        if new_content in same_role_contents:
+            return True
+        
+        if len(same_role_contents) >= 2:
+            last_two = same_role_contents[-2:]
+            if len(set(last_two)) == 1 and new_content == last_two[0]:
+                return True
+        
+        return False
+    
+    def _should_terminate_early(
+        self,
+        dialogue: List[DialogueTurn]
+    ) -> bool:
+        if len(dialogue) < 4:
+            return False
+        
+        doctor_msgs = [t.content for t in dialogue if t.role == "assistant"]
+        patient_msgs = [t.content for t in dialogue if t.role == "user"]
+        
+        if len(doctor_msgs) >= 3:
+            last_3_doctor = doctor_msgs[-3:]
+            if len(set(last_3_doctor)) == 1:
+                logger.warning("Detected repeated doctor responses, terminating early")
+                return True
+        
+        if len(patient_msgs) >= 3:
+            last_3_patient = patient_msgs[-3:]
+            if len(set(last_3_patient)) == 1:
+                logger.warning("Detected repeated patient responses, terminating early")
+                return True
+        
+        return False
     
     def generate_dialogue_with_tom(
         self,
@@ -326,9 +411,17 @@ Do NOT include meta-commentary or explanations of your reasoning.
         required_info = task_config.required_info if task_config else []
         
         for turn_num in range(1, max_turns):
+            if self._should_terminate_early(dialogue):
+                logger.warning(f"Early termination at turn {turn_num} due to repetition")
+                break
+            
             patient_response = self.patient_simulator.generate_patient_response(
                 tom_reasoning, context, dialogue, task_type, previous_trajectory
             )
+            
+            if self._check_dialogue_repetition(dialogue, patient_response, "user"):
+                logger.warning(f"Patient response repetition detected at turn {turn_num}")
+            
             dialogue.append(DialogueTurn(
                 content=patient_response,
                 role="user",
@@ -377,6 +470,10 @@ Do NOT include meta-commentary or explanations of your reasoning.
             doctor_response = self.generate_doctor_response_with_tom(
                 context, dialogue, tom_reasoning, task_type
             )
+            
+            if self._check_dialogue_repetition(dialogue, doctor_response, "assistant"):
+                logger.warning(f"Doctor response repetition detected at turn {turn_num}")
+            
             dialogue.append(DialogueTurn(
                 content=doctor_response,
                 role="assistant",
