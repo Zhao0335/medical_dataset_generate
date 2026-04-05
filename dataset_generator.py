@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-医疗数据集生成器主类
+医疗数据集生成器主类 - 严格落地论文1+2核心方案
 整合所有ToM模块，生成完整的对话数据集
 """
 
@@ -19,7 +19,9 @@ from tom_models import (
     MentalState,
     DialogueTurn,
     TargetFormat,
-    TemporalMentalTrajectory
+    TemporalMentalTrajectory,
+    MentalBoundary,
+    TaskType
 )
 from tom_reasoning import ToMReasoningModule
 from patient_simulator import PatientMindSimulator
@@ -40,15 +42,15 @@ class MedicalDatasetGenerator:
         self.goal_checker = ToMGoalChecker()
         
         self.task_configs = {
-            "diagnosis": {
+            TaskType.DIAGNOSIS.value: {
                 "system": "You are an experienced doctor using Theory of Mind for diagnosis.",
                 "required_info": ["symptoms", "duration", "severity", "medical history", "current medications"]
             },
-            "medrecon": {
+            TaskType.MEDRECON.value: {
                 "system": "You are a clinical pharmacist using Theory of Mind for medication reconciliation.",
                 "required_info": ["current medications", "dosages", "frequency", "adherence", "side effects"]
             },
-            "prescriptions": {
+            TaskType.PRESCRIPTIONS.value: {
                 "system": "You are a physician using Theory of Mind for prescription writing.",
                 "required_info": ["diagnosis", "allergies", "current medications", "patient preferences"]
             }
@@ -121,15 +123,27 @@ class MedicalDatasetGenerator:
     ) -> str:
         """
         论文要求：医生回复必须完全基于ToM推理结果
+        禁止ToM推理与回复脱节
         """
         
-        config = self.task_configs.get(task_type, self.task_configs["diagnosis"])
+        config = self.task_configs.get(task_type, self.task_configs[TaskType.DIAGNOSIS.value])
+        
+        if not tom_reasoning.has_valid_data():
+            print("[WARNING] ToM reasoning has no valid data, generating fallback response")
+            return self._generate_fallback_doctor_response(dialogue_history, task_type)
         
         error_corrections_summary = ""
         if tom_reasoning.tom_errors_detected:
             error_corrections_summary = f"""
 ToM ERROR CORRECTIONS APPLIED:
 {chr(10).join([f"- {e.error_type.value}: {e.correction_applied}" for e in tom_reasoning.tom_errors_detected])}
+"""
+        
+        temporal_chain_summary = ""
+        if tom_reasoning.temporal_chain_reasoning:
+            temporal_chain_summary = f"""
+TEMPORAL CHAIN REASONING:
+{self._format_temporal_chain(tom_reasoning.temporal_chain_reasoning)}
 """
         
         prompt = f"""{config['system']}
@@ -139,24 +153,23 @@ Step1 Decision: {"ToM invoked" if tom_reasoning.should_invoke_tom else "ToM not 
 DoM Level: {tom_reasoning.dom_level}
 Reason: {tom_reasoning.step1_decision_reason}
 
-=== MENTAL BOUNDARY SEPARATION ===
-DOCTOR's Known Info: {tom_reasoning.doctor_known_info}
-DOCTOR's Unknown Info: {tom_reasoning.doctor_unknown_info}
-PATIENT's Known Info: {tom_reasoning.patient_known_info}
-PATIENT's Knowledge Gaps: {tom_reasoning.patient_knowledge_gaps}
+=== MENTAL BOUNDARY SEPARATION (Strict Isolation) ===
+DOCTOR's Known Info: {tom_reasoning.mental_boundary.doctor_known}
+DOCTOR's Unknown Info: {tom_reasoning.mental_boundary.doctor_unknown}
+PATIENT's Known Info: {tom_reasoning.mental_boundary.patient_known}
+PATIENT's Knowledge Gaps: {tom_reasoning.mental_boundary.patient_knowledge_gaps}
 
 === PATIENT's MENTAL STATE ===
 Beliefs: {tom_reasoning.patient_mental_state.beliefs}
 Emotions: {tom_reasoning.patient_mental_state.emotions}
 Intentions: {tom_reasoning.patient_mental_state.intentions}
+Knowledge Gaps: {tom_reasoning.patient_mental_state.knowledge_gaps}
 
 === TEMPORAL TRAJECTORY ===
 Current Turn: {tom_reasoning.temporal_trajectory.turn_number if tom_reasoning.temporal_trajectory else 'N/A'}
-Changes: {tom_reasoning.temporal_trajectory.changes_from_previous if tom_reasoning.temporal_trajectory else 'N/A'}
+Changes: {tom_reasoning.temporal_trajectory.changes_from_previous if tom_reasoning.temporal_trajectory else {}}
 Causal Trigger: {tom_reasoning.temporal_trajectory.causal_event.trigger_event if tom_reasoning.temporal_trajectory and tom_reasoning.temporal_trajectory.causal_event else 'N/A'}
-
-=== CHAIN REASONING TRACE ===
-{json.dumps(tom_reasoning.chain_reasoning_trace, indent=2)}
+{temporal_chain_summary}
 {error_corrections_summary}
 === NEXT ACTION STRATEGY ===
 {tom_reasoning.next_action_strategy}
@@ -164,15 +177,32 @@ Causal Trigger: {tom_reasoning.temporal_trajectory.causal_event.trigger_event if
 === DIALOGUE HISTORY ===
 {self._format_dialogue_history(dialogue_history)}
 
-=== INSTRUCTIONS ===
-Generate your response that:
-1. ADDRESSES patient's knowledge gaps identified above
-2. RESPONDS to patient's emotions and intentions
-3. GATHERS info from doctor's unknown list
-4. FOLLOWS the next action strategy
-5. MAINTAINS temporal continuity
+=== CRITICAL INSTRUCTIONS ===
+Your response MUST be DIRECTLY DRIVEN by the ToM analysis above:
 
-OUTPUT: Your response to the patient (no meta-commentary)
+1. ADDRESS PATIENT's KNOWLEDGE GAPS:
+   - If patient has knowledge gaps, explain clearly
+   - Use simple language, avoid jargon
+   - Check for understanding
+
+2. RESPOND TO PATIENT's EMOTIONS:
+   - Acknowledge emotions: {tom_reasoning.patient_mental_state.emotions}
+   - Show empathy appropriately
+   - Provide reassurance if worried/anxious
+
+3. PURSUE PATIENT's INTENTIONS:
+   - Help patient achieve: {tom_reasoning.patient_mental_state.intentions}
+   - Address their goals
+
+4. GATHER MISSING INFO:
+   - Still need to know: {tom_reasoning.mental_boundary.doctor_unknown}
+   - Ask targeted questions
+
+5. FOLLOW NEXT ACTION STRATEGY:
+   - {tom_reasoning.next_action_strategy}
+
+OUTPUT: Your response to the patient (natural, empathetic, ToM-driven)
+Do NOT include meta-commentary or explanations of your reasoning.
 """
         
         try:
@@ -184,14 +214,47 @@ OUTPUT: Your response to the patient (no meta-commentary)
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"Doctor response generation error: {e}")
-            return "Can you tell me more about your symptoms?"
+            print(f"[ERROR] Doctor response generation error: {e}")
+            return self._generate_fallback_doctor_response(dialogue_history, task_type)
+    
+    def _generate_fallback_doctor_response(
+        self,
+        dialogue_history: List[DialogueTurn],
+        task_type: str
+    ) -> str:
+        """
+        生成后备医生回复
+        """
+        last_patient_msg = ""
+        for turn in reversed(dialogue_history):
+            if turn.role == "user":
+                last_patient_msg = turn.content
+                break
+        
+        if task_type == TaskType.DIAGNOSIS.value:
+            if not last_patient_msg:
+                return "Hello, I understand you're here for a consultation. Can you tell me what brings you in today?"
+            return "Thank you for sharing that. Can you tell me more about when these symptoms started and how severe they are?"
+        elif task_type == TaskType.MEDRECON.value:
+            return "Let's review your current medications. Can you tell me what medications you're currently taking and how you're taking them?"
+        else:
+            return "Based on what we've discussed, let me explain the treatment options available to you."
+    
+    def _format_temporal_chain(self, chain: List) -> str:
+        formatted = []
+        for link in chain[-5:]:
+            formatted.append(
+                f"Turn {link.turn_number}: {link.trigger_input}\n"
+                f"  → Observation: {link.observation}\n"
+                f"  → Inference: {link.inference}"
+            )
+        return "\n".join(formatted)
     
     def generate_dialogue_with_tom(
         self,
         patient_info: Dict[str, Any],
         task_type: str,
-        max_turns: int = 10
+        max_turns: int = 12
     ) -> Tuple[List[DialogueTurn], List[ToMReasoning]]:
         """
         论文核心：完整的双步骤ToM对话生成流程
@@ -225,16 +288,29 @@ OUTPUT: Your response to the patient (no meta-commentary)
             tom_reasoning = ToMReasoning(
                 should_invoke_tom=False,
                 dom_level=0,
-                step1_decision_reason=decision_reason
+                step1_decision_reason=decision_reason,
+                mental_boundary=MentalBoundary(
+                    doctor_known=["patient is here for consultation"],
+                    doctor_unknown=["symptoms", "history"],
+                    patient_known=[],
+                    patient_knowledge_gaps=["understanding of condition"]
+                ),
+                patient_mental_state=MentalState(
+                    beliefs=["has health concern"],
+                    emotions=["concern"],
+                    intentions=["seek medical help"],
+                    knowledge_gaps=["understanding of condition"]
+                )
             )
         
         tom_reasonings.append(tom_reasoning)
         dialogue[-1].tom_reasoning = tom_reasoning
+        dialogue[-1].mental_state_at_turn = tom_reasoning.patient_mental_state
         
         if tom_reasoning.temporal_trajectory:
             previous_trajectory = tom_reasoning.temporal_trajectory
         
-        config = self.task_configs.get(task_type, self.task_configs["diagnosis"])
+        config = self.task_configs.get(task_type, self.task_configs[TaskType.DIAGNOSIS.value])
         required_info = config.get("required_info", [])
         
         for turn_num in range(1, max_turns):
@@ -259,7 +335,9 @@ OUTPUT: Your response to the patient (no meta-commentary)
                 tom_reasoning = ToMReasoning(
                     should_invoke_tom=False,
                     dom_level=0,
-                    step1_decision_reason=decision_reason
+                    step1_decision_reason=decision_reason,
+                    mental_boundary=MentalBoundary(),
+                    patient_mental_state=previous_trajectory.mental_state.copy() if previous_trajectory and previous_trajectory.mental_state else MentalState()
                 )
             
             tom_reasonings.append(tom_reasoning)
@@ -279,7 +357,8 @@ OUTPUT: Your response to the patient (no meta-commentary)
                     content=doctor_response,
                     role="assistant",
                     turn_number=turn_num * 2,
-                    tom_reasoning=tom_reasoning
+                    tom_reasoning=tom_reasoning,
+                    mental_state_at_turn=tom_reasoning.patient_mental_state
                 ))
                 break
             
@@ -290,7 +369,8 @@ OUTPUT: Your response to the patient (no meta-commentary)
                 content=doctor_response,
                 role="assistant",
                 turn_number=turn_num * 2,
-                tom_reasoning=tom_reasoning
+                tom_reasoning=tom_reasoning,
+                mental_state_at_turn=tom_reasoning.patient_mental_state
             ))
         
         return dialogue, tom_reasonings
@@ -308,21 +388,25 @@ OUTPUT: Your response to the patient (no meta-commentary)
         """
         
         final_prompts = {
-            "diagnosis": "Based on our discussion and the information you've provided, here is my diagnosis and recommendation...",
-            "medrecon": "After reviewing your medications and discussing your concerns, here are my recommendations...",
-            "prescriptions": "Based on your diagnosis and our discussion, here are the prescriptions I recommend..."
+            TaskType.DIAGNOSIS.value: "Based on our discussion and the information you've provided, here is my diagnosis and recommendation...",
+            TaskType.MEDRECON.value: "After reviewing your medications and discussing your concerns, here are my recommendations...",
+            TaskType.PRESCRIPTIONS.value: "Based on your diagnosis and our discussion, here are the prescriptions I recommend..."
         }
         
         prompt = f"""{self.task_configs[task_type]['system']}
 
 === FINAL ToM SUMMARY ===
-Doctor's Known Info: {tom_reasoning.doctor_known_info}
-Patient's Knowledge Gaps Addressed: {tom_reasoning.patient_knowledge_gaps}
+Doctor's Known Info: {tom_reasoning.mental_boundary.doctor_known}
+Patient's Knowledge Gaps Addressed: {tom_reasoning.mental_boundary.patient_knowledge_gaps}
 Patient's Intentions Fulfilled: {tom_reasoning.patient_potential_intentions}
+Patient's Final Mental State:
+- Beliefs: {tom_reasoning.patient_mental_state.beliefs}
+- Emotions: {tom_reasoning.patient_mental_state.emotions}
+- Intentions: {tom_reasoning.patient_mental_state.intentions}
 
 === GOAL ACHIEVEMENT STATUS ===
-Doctor Info Complete: {goal_status.get('doctor_info_complete', False)}
-Patient Gaps Covered: {goal_status.get('patient_gaps_covered', False)}
+Doctor Info Complete: {goal_status.get('doctor_info_complete', False)} ({goal_status.get('doctor_completeness_score', 0):.0%})
+Patient Gaps Covered: {goal_status.get('patient_gaps_covered', False)} ({goal_status.get('patient_gap_coverage_score', 0):.0%})
 
 === DIALOGUE HISTORY ===
 {self._format_dialogue_history(dialogue_history)}
@@ -330,8 +414,9 @@ Patient Gaps Covered: {goal_status.get('patient_gaps_covered', False)}
 Generate a final response that:
 1. Provides clear diagnosis/medication reconciliation/prescription
 2. ADDRESSES all patient knowledge gaps identified
-3. RESPONDS to patient's intentions and concerns
+3. RESPONDS to patient's emotions and intentions
 4. Shows empathy and ensures patient understanding
+5. Provides clear next steps
 
 Start with: {final_prompts.get(task_type, "Based on our discussion...")}
 """
@@ -406,8 +491,11 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
         
         patient_info = self.extract_patient_info(ehr_data)
         
-        if task_type == "prescriptions":
+        if task_type == TaskType.PRESCRIPTIONS.value:
             patient_info["diagnosis"] = self.extract_disease_from_ehr(ehr_data)
+        
+        self.tom_module.trajectory_history = []
+        self.patient_simulator.response_history = []
         
         dialogue, tom_reasonings = self.generate_dialogue_with_tom(patient_info, task_type)
         
@@ -435,43 +523,41 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
                         "dom_level": turn.tom_reasoning.dom_level,
                         "decision_reason": turn.tom_reasoning.step1_decision_reason
                     },
-                    "mental_boundary_separation": {
-                        "doctor_known_info": turn.tom_reasoning.doctor_known_info,
-                        "doctor_unknown_info": turn.tom_reasoning.doctor_unknown_info,
-                        "patient_known_info": turn.tom_reasoning.patient_known_info,
-                        "patient_knowledge_gaps": turn.tom_reasoning.patient_knowledge_gaps
-                    },
-                    "patient_mental_state": {
-                        "beliefs": turn.tom_reasoning.patient_mental_state.beliefs,
-                        "emotions": turn.tom_reasoning.patient_mental_state.emotions,
-                        "intentions": turn.tom_reasoning.patient_mental_state.intentions,
-                        "knowledge_gaps": turn.tom_reasoning.patient_mental_state.knowledge_gaps
-                    },
+                    "mental_boundary_separation": turn.tom_reasoning.mental_boundary.to_dict(),
+                    "patient_mental_state": turn.tom_reasoning.patient_mental_state.to_dict(),
                     "patient_potential_intentions": turn.tom_reasoning.patient_potential_intentions,
                     "temporal_trajectory": {
                         "turn_number": turn.tom_reasoning.temporal_trajectory.turn_number if turn.tom_reasoning.temporal_trajectory else 0,
                         "changes_from_previous": turn.tom_reasoning.temporal_trajectory.changes_from_previous if turn.tom_reasoning.temporal_trajectory else {},
                         "causal_event": {
                             "trigger": turn.tom_reasoning.temporal_trajectory.causal_event.trigger_event if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None,
-                            "change_description": turn.tom_reasoning.temporal_trajectory.causal_event.change_description if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None
-                        } if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None
+                            "trigger_type": turn.tom_reasoning.temporal_trajectory.causal_event.trigger_type if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None,
+                            "change_description": turn.tom_reasoning.temporal_trajectory.causal_event.change_description if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None,
+                            "belief_changes": turn.tom_reasoning.temporal_trajectory.causal_event.belief_changes if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else [],
+                            "emotion_changes": turn.tom_reasoning.temporal_trajectory.causal_event.emotion_changes if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else [],
+                            "intention_changes": turn.tom_reasoning.temporal_trajectory.causal_event.intention_changes if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else []
+                        } if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None,
+                        "temporal_chain": [link.to_dict() for link in turn.tom_reasoning.temporal_trajectory.temporal_chain] if turn.tom_reasoning.temporal_trajectory else [],
+                        "anchored_history": turn.tom_reasoning.temporal_trajectory.anchored_history if turn.tom_reasoning.temporal_trajectory else []
                     },
-                    "chain_reasoning_trace": turn.tom_reasoning.chain_reasoning_trace,
+                    "temporal_chain_reasoning": [link.to_dict() for link in turn.tom_reasoning.temporal_chain_reasoning],
                     "tom_errors_detected": [
                         {
                             "error_type": e.error_type.value,
                             "description": e.error_description,
                             "correction": e.correction_applied,
-                            "corrected": e.corrected
+                            "corrected": e.corrected,
+                            "original_value": str(e.original_value)[:100] if e.original_value else None,
+                            "corrected_value": str(e.corrected_value)[:100] if e.corrected_value else None
                         } for e in turn.tom_reasoning.tom_errors_detected
                     ],
                     "next_action_strategy": turn.tom_reasoning.next_action_strategy
                 })
         
         ability_map = {
-            "diagnosis": "medical_diagnosis_with_tom",
-            "medrecon": "medication_reconciliation_with_tom",
-            "prescriptions": "prescription_writing_with_tom"
+            TaskType.DIAGNOSIS.value: "medical_diagnosis_with_tom",
+            TaskType.MEDRECON.value: "medication_reconciliation_with_tom",
+            TaskType.PRESCRIPTIONS.value: "prescription_writing_with_tom"
         }
         
         return TargetFormat(
@@ -493,10 +579,13 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
         self,
         input_file: str,
         output_dir: str,
-        task_types: List[str] = ["diagnosis", "medrecon", "prescriptions"],
+        task_types: List[str] = None,
         max_samples: int = None,
         delay: float = 2.0
     ):
+        
+        if task_types is None:
+            task_types = [TaskType.DIAGNOSIS.value, TaskType.MEDRECON.value, TaskType.PRESCRIPTIONS.value]
         
         os.makedirs(output_dir, exist_ok=True)
         
@@ -533,11 +622,15 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
                                     for ann in sample.tom_annotations
                                 )
                                 print(f"  [{task_type.upper()}] ToM errors detected & corrected: {errors_count}")
+                                
+                                dom_levels = [ann.get('step1_decision', {}).get('dom_level', 0) 
+                                            for ann in sample.tom_annotations]
+                                print(f"  [{task_type.upper()}] DoM levels used: {set(dom_levels)}")
                         
                         time.sleep(delay)
                         
                 except Exception as e:
-                    print(f"Error processing sample {idx}: {e}")
+                    print(f"[ERROR] Processing sample {idx}: {e}")
                     import traceback
                     traceback.print_exc()
                     continue

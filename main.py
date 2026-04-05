@@ -32,6 +32,17 @@ def main():
     
     args = parser.parse_args()
     
+    print("="*60)
+    print("ToM-Based Medical Dataset Generator")
+    print("="*60)
+    print(f"\nConfiguration:")
+    print(f"  Input file: {args.input}")
+    print(f"  Output directory: {args.output}")
+    print(f"  Task types: {args.tasks}")
+    print(f"  Max samples: {args.max_samples or 'All'}")
+    print(f"  Model: {args.model}")
+    print(f"  API delay: {args.delay}s")
+    
     generator = MedicalDatasetGenerator(
         api_key=args.api_key,
         base_url=args.base_url,

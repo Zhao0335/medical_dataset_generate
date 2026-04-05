@@ -1,6 +1,6 @@
 # 医疗干预智能体数据集生成工具 - ToM深度实现
 
-基于Theory of Mind（心智理论）深度实现的医疗对话数据集生成工具，严格落地两篇ToM论文核心方案。
+基于Theory of Mind（心智理论）深度实现的医疗对话数据集生成工具，**严格落地两篇ToM论文核心方案**。
 
 ## 核心特性
 
@@ -8,19 +8,21 @@
 
 **Step 1: ToM调用自主决策**
 - 模型自主判断是否需要调用ToM推理（可返回`should_invoke_tom=False`）
+- **绝不强制永远调用**
 - 自适应确定心理化深度（DoM Level: 0阶/1阶，医疗合作场景禁止高阶）
-- 识别潜在错误类型并实时修正：
-  - **TypeA（过度心智化）**：禁止对患者简单提问做复杂意图猜测
-  - **TypeB（心智不足）**：必须识别患者回避、顾虑、知识缺口等隐性心理
-  - **TypeC（推理错误）**：校验心智推理与对话上下文一致性
 
 **Step 2: 心理状态推理**
-- 严格心智边界隔离：
+- **严格心智边界隔离**：
   - 医生已知信息 vs 医生未知信息
   - 患者已知信息 vs 患者知识缺口
 - 患者潜在意图推理
 - 患者心理状态（信念、情绪、意图、知识缺口）
 - 下一步行动策略
+
+**3类ToM错误实时检测+自动修正**：
+- **TypeA（过度心智化）**：禁止对患者简单提问做复杂意图猜测
+- **TypeB（心智不足）**：必须识别患者回避、顾虑、知识缺口等隐性心理
+- **TypeC（推理错误）**：校验心智推理与对话上下文一致性
 
 ### 论文2：动态时序ToM（Dynamic Temporal ToM）
 
@@ -37,18 +39,19 @@
 - 展示适当的情感反应
 - 自然追求患者意图
 - 维持与前一心理状态的连续性
+- **禁止生成通用静态回复**
 
 ### ToM目标达成判断
 
 对话终止条件（废除关键词/最大轮次终止）：
 - ✅ 医生信息补齐（doctor_unknown_info收集完整度≥80%）
 - ✅ 患者知识缺口覆盖（patient_knowledge_gaps解决度≥70%）
-- ✅ 安全限制：最大对话长度12轮
+- ✅ 安全限制：最大对话长度15轮
 
 ## 项目结构
 
 ```
-d:\MY DATA\medical_dataset_generate/
+d:\4github\medical_dataset_generate/
 ├── tom_models.py           # 数据模型定义（MentalState, ToMReasoning, TemporalMentalTrajectory等）
 ├── tom_error_detector.py   # ToM错误检测器（TypeA/B/C三类错误检测与修正）
 ├── tom_reasoning.py        # ToM推理模块（双步骤决策、自适应DoM、时序链式推理）
@@ -69,6 +72,7 @@ d:\MY DATA\medical_dataset_generate/
 │  │  - Step1: 自主决策  │  │  - 时序心理驱动   │  │  - 目标判断  │ │
 │  │  - Step2: 状态推理  │  │  - 自然回复生成   │  │  - 终止条件  │ │
 │  │  - 自适应DoM       │  │  - 情绪/意图反映  │  │              │ │
+│  │  - 时序链式推理     │  │  - 禁止通用回复   │  │              │ │
 │  └─────────┬─────────┘  └──────────────────┘  └──────────────┘ │
 │            │                                                    │
 │            ▼                                                    │
@@ -96,97 +100,49 @@ class MentalState:
 @dataclass
 class CausalEvent:
     trigger_event: str          # 触发事件
+    trigger_type: str           # 触发类型
     mental_state_before: MentalState
     mental_state_after: MentalState
+    belief_changes: List[str]   # 信念变化
+    emotion_changes: List[str]  # 情绪变化
+    intention_changes: List[str] # 意图变化
     change_description: str     # 变化描述
+
+@dataclass
+class TemporalChainLink:
+    turn_number: int            # 轮次号
+    trigger_input: str          # 触发输入
+    observation: str            # 观察
+    inference: str              # 推断
+    mental_state_delta: Dict    # 心理状态变化
+    evidence_links: List[str]   # 证据链接
 
 @dataclass
 class TemporalMentalTrajectory:
     turn_number: int            # 轮次号
-    timestamp: str              # 时间戳
     mental_state: MentalState   # 当前心理状态
     causal_event: CausalEvent   # 因果事件
-    changes_from_previous: Dict # 与上一轮的变化
+    temporal_chain: List[TemporalChainLink]  # 时序链
+    anchored_history: List[Dict] # 锚定历史（解决中间丢失）
+
+@dataclass
+class MentalBoundary:
+    doctor_known: List[str]     # 医生已知
+    doctor_unknown: List[str]   # 医生未知
+    patient_known: List[str]    # 患者已知
+    patient_knowledge_gaps: List[str]  # 患者知识缺口
 
 @dataclass
 class ToMReasoning:
-    should_invoke_tom: bool              # Step1决策：是否调用ToM
-    dom_level: int                       # 心理化深度 (0/1)
-    step1_decision_reason: str           # Step1决策原因
-    doctor_known_info: List[str]         # 医生已知信息
-    doctor_unknown_info: List[str]       # 医生未知信息
-    patient_known_info: List[str]        # 患者已知信息
-    patient_knowledge_gaps: List[str]    # 患者知识缺口
-    patient_potential_intentions: List[str]
+    should_invoke_tom: bool     # Step1决策：是否调用ToM
+    dom_level: int              # 心理化深度 (0/1)
+    step1_decision_reason: str  # Step1决策原因
+    mental_boundary: MentalBoundary  # 心智边界
     patient_mental_state: MentalState
     temporal_trajectory: TemporalMentalTrajectory
+    temporal_chain_reasoning: List[TemporalChainLink]
     tom_errors_detected: List[ToMErrorRecord]
-    chain_reasoning_trace: List[Dict]    # 时序链式推理轨迹
     next_action_strategy: str
-```
-
-### 输出格式
-
-```json
-{
-  "data_source": "ehr_bench_tom_v2",
-  "topic": "疾病名称",
-  "department": "科室",
-  "subdepartment": "子科室",
-  "disease": "疾病",
-  "prompt": [
-    {"content": "对话内容", "role": "user/assistant"}
-  ],
-  "ability": "medical_diagnosis_with_tom",
-  "reward_model": {
-    "ground_truth": "正确答案",
-    "style": "tom_dialogue_temporal"
-  },
-  "tom_annotations": [
-    {
-      "turn_index": 0,
-      "turn_number": 0,
-      "step1_decision": {
-        "should_invoke_tom": true,
-        "dom_level": 1,
-        "decision_reason": "Patient utterance contains signals requiring ToM analysis"
-      },
-      "mental_boundary_separation": {
-        "doctor_known_info": ["info1"],
-        "doctor_unknown_info": ["info1"],
-        "patient_known_info": ["info1"],
-        "patient_knowledge_gaps": ["gap1"]
-      },
-      "patient_mental_state": {
-        "beliefs": ["belief1"],
-        "emotions": ["emotion1"],
-        "intentions": ["intention1"],
-        "knowledge_gaps": ["gap1"]
-      },
-      "patient_potential_intentions": ["intention1"],
-      "temporal_trajectory": {
-        "turn_number": 1,
-        "changes_from_previous": {"beliefs": [], "emotions": [], "intentions": []},
-        "causal_event": {
-          "trigger": "医生询问症状",
-          "change_description": "患者情绪从焦虑转为担忧"
-        }
-      },
-      "chain_reasoning_trace": [
-        {"step": 1, "observation": "患者提到胸痛", "inference": "患者担心心脏问题"}
-      ],
-      "tom_errors_detected": [
-        {
-          "error_type": "under_mentalizing",
-          "description": "Patient shows hesitation but no emotions detected",
-          "correction": "Added detected emotions",
-          "corrected": true
-        }
-      ],
-      "next_action_strategy": "Address patient's anxiety and gather more symptom details"
-    }
-  ]
-}
 ```
 
 ## 使用方法
@@ -200,11 +156,11 @@ pip install openai
 ### 基本用法
 
 ```bash
-python main.py \
-    --input ehr_bench_decision_making.jsonl \
-    --output ./output_tom \
-    --api_key YOUR_API_KEY \
-    --base_url YOUR_API_BASE_URL \
+python main.py `
+    --input ehr_bench_decision_making.jsonl `
+    --output ./output_tom `
+    --api_key YOUR_API_KEY `
+    --base_url YOUR_API_BASE_URL `
     --model gpt-4
 ```
 
@@ -270,9 +226,11 @@ python main.py --model gpt-4-turbo --delay 3.0
 | 要求 | 实现位置 |
 |------|----------|
 | Step1自主决策是否调用ToM | `tom_reasoning.py` → `step1_tom_invocation_decision()` |
+| 可返回should_invoke_tom=False | ✅ 支持返回False |
 | 自适应DoM（0-1阶） | `tom_reasoning.py` → `_determine_adaptive_dom()` |
+| 禁止高阶DoM | ✅ 医疗合作场景只使用0阶/1阶 |
 | TypeA/B/C错误检测修正 | `tom_error_detector.py` → `detect_and_correct_errors()` |
-| 心智边界隔离 | `tom_reasoning.py` → `step2_mental_state_inference()` |
+| 心智边界隔离 | `tom_models.py` → `MentalBoundary` |
 
 ### 论文2：动态时序ToM
 
@@ -280,9 +238,23 @@ python main.py --model gpt-4-turbo --delay 3.0
 |------|----------|
 | 时序心理轨迹 | `tom_models.py` → `TemporalMentalTrajectory` |
 | 因果触发链 | `tom_models.py` → `CausalEvent` |
-| 时序链式推理 | `tom_reasoning.py` → `chain_reasoning_trace` |
+| 时序链式推理 | `tom_models.py` → `TemporalChainLink` |
+| 禁用普通CoT | `tom_reasoning.py` → `_build_temporal_chain_prompt()` |
 | 患者回复由心理状态驱动 | `patient_simulator.py` → `generate_patient_response()` |
+| 禁止通用静态回复 | `patient_simulator.py` → `FORBIDDEN_GENERIC_RESPONSES` |
+| 解决中间丢失 | `TemporalMentalTrajectory` → `anchored_history` |
 | ToM目标终止条件 | `tom_goal_checker.py` → `check_tom_goal_achieved()` |
+
+### 全局禁止行为检查
+
+| 禁止行为 | 状态 |
+|----------|------|
+| 空函数、空列表、空字段仅定义不使用 | ✅ 所有字段都有默认值和使用逻辑 |
+| ToM推理与医生/患者回复脱节 | ✅ 回复完全基于ToM推理结果生成 |
+| 固定ToM调用 | ✅ Step1可返回False |
+| 固定DoM层级 | ✅ 自适应选择0阶/1阶 |
+| 用普通链式思维替代时序链式推理 | ✅ 使用TemporalChainLink |
+| 患者模拟器生成通用静态回复 | ✅ 禁止列表+验证机制 |
 
 ## 输出文件
 
@@ -303,11 +275,13 @@ Chief Complaint: Pleuritic chest pain
   [DIAGNOSIS] Generated 6 dialogue turns
   [DIAGNOSIS] ToM annotations: 6
   [DIAGNOSIS] ToM errors detected & corrected: 2
+  [DIAGNOSIS] DoM levels used: {0, 1}
 
   [MEDRECON] Generating ToM-based dialogue...
   [MEDRECON] Generated 5 dialogue turns
   [MEDRECON] ToM annotations: 5
   [MEDRECON] ToM errors detected & corrected: 1
+  [MEDRECON] DoM levels used: {0, 1}
 ```
 
 ## 注意事项
