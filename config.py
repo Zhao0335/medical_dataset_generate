@@ -6,7 +6,10 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Literal
+
+
+ProviderType = Literal["openai", "local", "vllm"]
 
 
 @dataclass
@@ -15,6 +18,24 @@ class ToMThresholds:
     patient_gap_coverage_threshold: float = 0.70
     max_safety_turns: int = 15
     max_dialogue_turns: int = 12
+
+
+@dataclass
+class LLMConfig:
+    provider: ProviderType = "openai"
+    model: str = "gpt-4"
+    max_tokens: int = 2500
+    temperature: float = 0.3
+    delay: float = 2.0
+    max_retries: int = 3
+    api_key: str = ""
+    base_url: str = ""
+    local_model_path: str = ""
+    device: str = "auto"
+    load_in_8bit: bool = False
+    load_in_4bit: bool = False
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.9
 
 
 @dataclass
@@ -38,6 +59,7 @@ class TaskConfig:
 class Config:
     tom_thresholds: ToMThresholds = field(default_factory=ToMThresholds)
     api: APIConfig = field(default_factory=APIConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     task_configs: Dict[str, TaskConfig] = field(default_factory=dict)
     
     def __post_init__(self):
@@ -59,17 +81,63 @@ class Config:
     @classmethod
     def from_env(cls) -> 'Config':
         config = cls()
-        config.api.api_key = os.environ.get("OPENAI_API_KEY", "")
-        config.api.base_url = os.environ.get("OPENAI_BASE_URL", "")
+        config.llm.api_key = os.environ.get("OPENAI_API_KEY", "")
+        config.llm.base_url = os.environ.get("OPENAI_BASE_URL", "")
+        config.llm.local_model_path = os.environ.get("LOCAL_MODEL_PATH", "")
+        config.llm.provider = os.environ.get("LLM_PROVIDER", "openai")
+        config.api.api_key = config.llm.api_key
+        config.api.base_url = config.llm.base_url
         return config
     
     @classmethod
-    def from_args(cls, api_key: str = None, base_url: str = None, model: str = "gpt-4") -> 'Config':
+    def from_args(
+        cls,
+        provider: str = "openai",
+        api_key: str = None,
+        base_url: str = None,
+        model: str = "gpt-4",
+        local_model_path: str = None,
+        device: str = "auto"
+    ) -> 'Config':
         config = cls()
-        config.api.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        config.api.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "")
+        config.llm.provider = provider
+        config.llm.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        config.llm.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "")
+        config.llm.model = model
+        config.llm.local_model_path = local_model_path or os.environ.get("LOCAL_MODEL_PATH", "")
+        config.llm.device = device
+        config.api.api_key = config.llm.api_key
+        config.api.base_url = config.llm.base_url
         config.api.model = model
         return config
+    
+    def create_llm_provider(self):
+        from llm_provider import create_llm_provider
+        
+        if self.llm.provider == "openai":
+            return create_llm_provider(
+                "openai",
+                api_key=self.llm.api_key,
+                base_url=self.llm.base_url,
+                model=self.llm.model
+            )
+        elif self.llm.provider == "local":
+            return create_llm_provider(
+                "local",
+                model_path=self.llm.local_model_path,
+                device=self.llm.device,
+                load_in_8bit=self.llm.load_in_8bit,
+                load_in_4bit=self.llm.load_in_4bit
+            )
+        elif self.llm.provider == "vllm":
+            return create_llm_provider(
+                "vllm",
+                model_path=self.llm.local_model_path,
+                tensor_parallel_size=self.llm.tensor_parallel_size,
+                gpu_memory_utilization=self.llm.gpu_memory_utilization
+            )
+        else:
+            raise ValueError(f"Unknown provider: {self.llm.provider}")
 
 
 REQUIRED_INFO_BY_TASK: Dict[str, Dict[str, List[str]]] = {

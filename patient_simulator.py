@@ -10,8 +10,6 @@ import json
 import time
 from typing import Dict, List, Any, Optional
 
-from openai import OpenAI
-
 from tom_models import (
     ToMReasoning,
     TemporalMentalTrajectory,
@@ -21,15 +19,15 @@ from tom_models import (
 from config import config, FORBIDDEN_GENERIC_RESPONSES
 from utils import format_dialogue_history, APIError
 from logger import get_logger
+from llm_provider import BaseLLMProvider
 
 logger = get_logger()
 
 
 class PatientMindSimulator:
     
-    def __init__(self, client: OpenAI, model: str):
-        self.client = client
-        self.model = model
+    def __init__(self, llm_provider: BaseLLMProvider):
+        self.llm_provider = llm_provider
         self.response_history: List[str] = []
     
     def _validate_response_not_generic(self, response: str) -> bool:
@@ -256,17 +254,16 @@ The response must be at least 15 characters and show clear mental state reflecti
             tom_reasoning, context, dialogue_history, task_type, previous_trajectory
         )
         
-        max_attempts = config.api.max_retries
+        max_attempts = config.llm.max_retries
         for attempt in range(max_attempts):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
+                response = self.llm_provider.generate_chat(
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=300,
                     temperature=0.7
                 )
                 
-                patient_response = response.choices[0].message.content.strip()
+                patient_response = response.content.strip()
                 
                 if not self._validate_response_not_generic(patient_response):
                     logger.warning(f"Generated generic response, regenerating (attempt {attempt + 1})")

@@ -57,21 +57,30 @@ def open_jsonl_files(output_dir: str, task_types: List[str]):
 
 class MedicalDatasetGenerator:
     
-    def __init__(self, api_key: str = None, base_url: str = None, model: str = "gpt-4"):
-        self.config = Config.from_args(api_key, base_url, model)
-        
-        is_valid, error_msg = validate_api_key(self.config.api.api_key)
-        if not is_valid:
-            raise ConfigurationError(f"API key validation failed: {error_msg}")
-        
-        self.client = OpenAI(
-            api_key=self.config.api.api_key,
-            base_url=self.config.api.base_url
+    def __init__(
+        self,
+        provider: str = "openai",
+        api_key: str = None,
+        base_url: str = None,
+        model: str = "gpt-4",
+        local_model_path: str = None,
+        device: str = "auto",
+        load_in_8bit: bool = False,
+        load_in_4bit: bool = False
+    ):
+        self.config = Config.from_args(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            local_model_path=local_model_path,
+            device=device
         )
-        self.model = self.config.api.model
         
-        self.tom_module = ToMReasoningModule(self.client, self.model)
-        self.patient_simulator = PatientMindSimulator(self.client, self.model)
+        self.llm_provider = self.config.create_llm_provider()
+        
+        self.tom_module = ToMReasoningModule(self.llm_provider)
+        self.patient_simulator = PatientMindSimulator(self.llm_provider)
         self.goal_checker = ToMGoalChecker()
     
     def extract_patient_info(self, ehr_data: Dict) -> Dict[str, Any]:
@@ -222,13 +231,12 @@ Do NOT include meta-commentary or explanations of your reasoning.
 """
         
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
+            response = self.llm_provider.generate_chat(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=500,
                 temperature=0.5
             )
-            return response.choices[0].message.content.strip()
+            return response.content.strip()
         except Exception as e:
             logger.error(f"Doctor response generation error: {e}")
             return self._generate_fallback_doctor_response(dialogue_history, task_type)
@@ -426,13 +434,12 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
 """
         
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
+            response = self.llm_provider.generate_chat(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=600,
                 temperature=0.5
             )
-            return response.choices[0].message.content.strip()
+            return response.content.strip()
         except Exception as e:
             logger.error(f"Final response generation error: {e}")
             return final_prompts.get(task_type, "Thank you for the consultation.")

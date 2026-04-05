@@ -9,9 +9,7 @@ ToM推理模块 - 严格落地论文1+2核心方案
 import json
 import re
 import time
-from typing import Dict, List, Any, Optional, Tuple
-
-from openai import OpenAI
+from typing import Dict, List, Any, Optional, Tuple, Union
 
 from tom_models import (
     ToMReasoning,
@@ -33,15 +31,15 @@ from config import (
 )
 from utils import format_dialogue_history, safe_json_loads, APIError
 from logger import get_logger
+from llm_provider import BaseLLMProvider
 
 logger = get_logger()
 
 
 class ToMReasoningModule:
     
-    def __init__(self, client: OpenAI, model: str):
-        self.client = client
-        self.model = model
+    def __init__(self, llm_provider: BaseLLMProvider):
+        self.llm_provider = llm_provider
         self.error_detector = ToMErrorDetector()
         self.trajectory_history: List[TemporalMentalTrajectory] = []
     
@@ -270,14 +268,13 @@ OUTPUT FORMAT (JSON):
         )
         
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
+            response = self.llm_provider.generate_chat(
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=config.api.max_tokens,
-                temperature=config.api.temperature
+                max_tokens=config.llm.max_tokens,
+                temperature=config.llm.temperature
             )
             
-            result = safe_json_loads(response.choices[0].message.content)
+            result = safe_json_loads(response.content)
             if not result:
                 raise APIError("Failed to parse LLM response as JSON")
             

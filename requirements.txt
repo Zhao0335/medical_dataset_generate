@@ -1,1 +1,15 @@
+# Core dependencies
 openai>=1.0.0
+
+# Local model support (optional)
+# Uncomment the following lines if you want to use local models
+torch>=2.0.0
+transformers>=4.30.0
+accelerate>=0.20.0
+safetensors>=0.3.0
+
+# For 4-bit/8-bit quantization (optional)
+# bitsandbytes>=0.39.0
+
+# For vLLM high-performance inference (optional)
+# vllm>=0.2.0
