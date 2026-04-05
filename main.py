@@ -6,8 +6,13 @@
 """
 
 import argparse
+import sys
 
 from dataset_generator import MedicalDatasetGenerator
+from utils import ConfigurationError
+from logger import get_logger
+
+logger = get_logger()
 
 
 def main():
@@ -32,30 +37,37 @@ def main():
     
     args = parser.parse_args()
     
-    print("="*60)
-    print("ToM-Based Medical Dataset Generator")
-    print("="*60)
-    print(f"\nConfiguration:")
-    print(f"  Input file: {args.input}")
-    print(f"  Output directory: {args.output}")
-    print(f"  Task types: {args.tasks}")
-    print(f"  Max samples: {args.max_samples or 'All'}")
-    print(f"  Model: {args.model}")
-    print(f"  API delay: {args.delay}s")
+    logger.info("=" * 60)
+    logger.info("ToM-Based Medical Dataset Generator")
+    logger.info("=" * 60)
+    logger.info(f"Input file: {args.input}")
+    logger.info(f"Output directory: {args.output}")
+    logger.info(f"Task types: {args.tasks}")
+    logger.info(f"Max samples: {args.max_samples or 'All'}")
+    logger.info(f"Model: {args.model}")
+    logger.info(f"API delay: {args.delay}s")
     
-    generator = MedicalDatasetGenerator(
-        api_key=args.api_key,
-        base_url=args.base_url,
-        model=args.model
-    )
-    
-    generator.process_ehr_file(
-        input_file=args.input,
-        output_dir=args.output,
-        task_types=args.tasks,
-        max_samples=args.max_samples,
-        delay=args.delay
-    )
+    try:
+        generator = MedicalDatasetGenerator(
+            api_key=args.api_key,
+            base_url=args.base_url,
+            model=args.model
+        )
+        
+        generator.process_ehr_file(
+            input_file=args.input,
+            output_dir=args.output,
+            task_types=args.tasks,
+            max_samples=args.max_samples,
+            delay=args.delay
+        )
+    except ConfigurationError as e:
+        logger.error(f"Configuration error: {e}")
+        logger.error("Please set OPENAI_API_KEY environment variable or provide --api_key argument")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

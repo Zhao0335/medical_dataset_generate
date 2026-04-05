@@ -18,32 +18,17 @@ from tom_models import (
     DialogueTurn,
     MentalBoundary
 )
+from config import (
+    OVER_MENTALIZING_KEYWORDS,
+    AVOIDANCE_SIGNALS,
+    KNOWLEDGE_GAP_INDICATORS
+)
+from logger import get_logger
+
+logger = get_logger()
 
 
 class ToMErrorDetector:
-    
-    OVER_MENTALIZING_KEYWORDS = [
-        'hidden agenda', 'ulterior motive', 'manipulating', 'deceiving',
-        'secretly planning', 'pretending', 'lying about',
-        '隐藏动机', '欺骗', '假装', '秘密计划'
-    ]
-    
-    AVOIDANCE_SIGNALS = [
-        r"(i don't know|not sure|maybe|i guess|i think so|我不知道|不太清楚|也许|大概)",
-        r"(but|however|although|但是|不过|虽然)",
-        r"(worried|concerned|afraid|scared|anxious|担心|害怕|顾虑|焦虑)",
-        r"(hesitat|uncertain|confus|unclear|犹豫|不确定|困惑|不清楚)",
-        r"(actually|to be honest|honestly|其实|说实话|老实说)",
-        r"(never mind|forget it|nothing|算了|没事|没什么)"
-    ]
-    
-    KNOWLEDGE_GAP_INDICATORS = [
-        r'\?',
-        r'(what|why|how|when|what if|什么|为什么|怎么|何时|如果)',
-        r"(i don't understand|i'm confused|can you explain|我不明白|我不懂|能解释)",
-        r"(what does that mean|what do you mean|是什么意思|什么意思)",
-        r"(is it|will i|do i need|是不是|我会|我需要)"
-    ]
     
     def detect_type_a_over_mentalizing(
         self,
@@ -51,10 +36,6 @@ class ToMErrorDetector:
         inferred_intentions: List[str],
         dialogue_context: List[DialogueTurn]
     ) -> Tuple[bool, str, Optional[List[str]]]:
-        """
-        TypeA检测：过度心智化
-        禁止对简单提问做复杂意图猜测
-        """
         simple_patterns = [
             r'^.{1,25}$',
             r'^(yes|no|ok|okay|sure|alright|好的|是的|没有|行|明白|了解).*$',
@@ -76,9 +57,9 @@ class ToMErrorDetector:
             ), corrected
         
         for intention in inferred_intentions:
-            if any(kw in intention.lower() for kw in self.OVER_MENTALIZING_KEYWORDS):
+            if any(kw in intention.lower() for kw in OVER_MENTALIZING_KEYWORDS):
                 corrected = [i for i in inferred_intentions 
-                           if not any(kw in i.lower() for kw in self.OVER_MENTALIZING_KEYWORDS)]
+                           if not any(kw in i.lower() for kw in OVER_MENTALIZING_KEYWORDS)]
                 return True, (
                     f"Over-mentalizing: Attributing complex motive '{intention}' without evidence. "
                     f"Removed over-mentalized intention."
@@ -100,18 +81,14 @@ class ToMErrorDetector:
         dialogue_context: List[DialogueTurn],
         mental_boundary: Optional[MentalBoundary] = None
     ) -> Tuple[bool, str, Optional[MentalState]]:
-        """
-        TypeB检测：心智不足
-        必须识别患者回避、顾虑、知识缺口等隐性心理
-        """
         has_avoidance_signal = any(
             re.search(pattern, patient_utterance, re.IGNORECASE)
-            for pattern in self.AVOIDANCE_SIGNALS
+            for pattern in AVOIDANCE_SIGNALS
         )
         
         has_knowledge_gap_indicator = any(
             re.search(pattern, patient_utterance, re.IGNORECASE)
-            for pattern in self.KNOWLEDGE_GAP_INDICATORS
+            for pattern in KNOWLEDGE_GAP_INDICATORS
         )
         
         corrections_needed = []
@@ -159,9 +136,6 @@ class ToMErrorDetector:
         return False, "", None
     
     def _extract_gap_topic(self, utterance: str) -> str:
-        """
-        从患者话语中提取知识缺口主题
-        """
         utterance_lower = utterance.lower()
         
         if 'what' in utterance_lower or '什么' in utterance:
@@ -186,10 +160,6 @@ class ToMErrorDetector:
         patient_info: Dict[str, Any],
         mental_boundary: Optional[MentalBoundary] = None
     ) -> Tuple[bool, str, Optional[MentalState]]:
-        """
-        TypeC检测：推理错误
-        校验推理与上下文一致性
-        """
         corrected_state = mental_state.copy()
         errors_found = []
         
@@ -271,9 +241,6 @@ class ToMErrorDetector:
         turn_number: int,
         mental_boundary: Optional[MentalBoundary] = None
     ) -> Tuple[List[ToMErrorRecord], MentalState, List[str]]:
-        """
-        综合3类错误检测与修正
-        """
         errors = []
         corrected_state = mental_state.copy()
         corrected_intentions = intentions.copy() if intentions else []
@@ -292,6 +259,7 @@ class ToMErrorDetector:
                 corrected_value=corrected_a
             ))
             corrected_intentions = corrected_a
+            logger.warning(f"TypeA error detected at turn {turn_number}: {desc_a}")
         
         is_type_b, desc_b, corrected_b = self.detect_type_b_under_mentalizing(
             patient_utterance, mental_state, dialogue_history, mental_boundary
@@ -307,6 +275,7 @@ class ToMErrorDetector:
                 corrected_value=corrected_b.to_dict()
             ))
             corrected_state = corrected_b
+            logger.warning(f"TypeB error detected at turn {turn_number}: {desc_b}")
         
         is_type_c, desc_c, corrected_c = self.detect_type_c_reasoning_error(
             corrected_state, dialogue_history, patient_info, mental_boundary
@@ -322,6 +291,7 @@ class ToMErrorDetector:
                 corrected_value=corrected_c.to_dict()
             ))
             corrected_state = corrected_c
+            logger.warning(f"TypeC error detected at turn {turn_number}: {desc_c}")
         
         if not corrected_intentions:
             corrected_intentions = ["seeking medical consultation"]
@@ -341,9 +311,6 @@ class ToMErrorDetector:
         mental_boundary: MentalBoundary,
         dialogue_history: List[DialogueTurn]
     ) -> List[str]:
-        """
-        验证心智边界是否正确隔离
-        """
         violations = []
         
         doctor_patient_overlap = set(mental_boundary.doctor_known) & set(mental_boundary.patient_known)
@@ -357,5 +324,8 @@ class ToMErrorDetector:
         gaps_in_patient_known = set(mental_boundary.patient_knowledge_gaps) & set(mental_boundary.patient_known)
         if gaps_in_patient_known:
             violations.append(f"Patient knowledge gaps overlap with known: {gaps_in_patient_known}")
+        
+        if violations:
+            logger.warning(f"Mental boundary violations: {violations}")
         
         return violations

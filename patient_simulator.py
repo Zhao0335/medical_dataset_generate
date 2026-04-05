@@ -18,20 +18,14 @@ from tom_models import (
     DialogueTurn,
     MentalState
 )
+from config import config, FORBIDDEN_GENERIC_RESPONSES
+from utils import format_dialogue_history, APIError
+from logger import get_logger
+
+logger = get_logger()
 
 
 class PatientMindSimulator:
-    
-    FORBIDDEN_GENERIC_RESPONSES = [
-        "I see. Can you explain more about that?",
-        "Okay, I understand.",
-        "Thank you for the information.",
-        "I'll follow your advice.",
-        "That makes sense.",
-        "好的，我明白了。",
-        "谢谢您的解释。",
-        "我会按照您的建议做的。"
-    ]
     
     def __init__(self, client: OpenAI, model: str):
         self.client = client
@@ -39,11 +33,8 @@ class PatientMindSimulator:
         self.response_history: List[str] = []
     
     def _validate_response_not_generic(self, response: str) -> bool:
-        """
-        验证回复不是通用静态回复
-        """
         response_stripped = response.strip()
-        for forbidden in self.FORBIDDEN_GENERIC_RESPONSES:
+        for forbidden in FORBIDDEN_GENERIC_RESPONSES:
             if forbidden.lower() in response_stripped.lower():
                 return False
         if len(response_stripped) < 10:
@@ -58,9 +49,6 @@ class PatientMindSimulator:
         task_type: str,
         previous_trajectory: Optional[TemporalMentalTrajectory]
     ) -> str:
-        """
-        构建完全由心理状态驱动的患者回复提示
-        """
         
         current_state = tom_reasoning.patient_mental_state
         trajectory = tom_reasoning.temporal_trajectory
@@ -138,7 +126,7 @@ KNOWLEDGE GAPS (What patient doesn't understand):
 {json.dumps(context.get('patient_info', {}), indent=2, ensure_ascii=False)}
 
 === DIALOGUE HISTORY ===
-{self._format_dialogue_history(dialogue_history)}
+{format_dialogue_history(dialogue_history)}
 
 === RESPONSE GENERATION INSTRUCTIONS ===
 Generate a response that:
@@ -167,7 +155,7 @@ Generate a response that:
 
 === FORBIDDEN RESPONSES ===
 DO NOT generate any of these generic responses:
-{json.dumps(self.FORBIDDEN_GENERIC_RESPONSES, indent=2)}
+{json.dumps(FORBIDDEN_GENERIC_RESPONSES, indent=2)}
 
 OUTPUT: Just the patient's response (natural, conversational, emotion-reflecting, intention-driven)
 The response must be at least 15 characters and show clear mental state reflection.
@@ -175,9 +163,6 @@ The response must be at least 15 characters and show clear mental state reflecti
         return prompt
     
     def _get_emotion_display_hints(self, emotions: List[str]) -> str:
-        """
-        根据情绪生成表达提示
-        """
         if not emotions:
             return "No specific emotions detected - respond neutrally but engaged"
         
@@ -200,9 +185,6 @@ The response must be at least 15 characters and show clear mental state reflecti
         return "\n".join(hints) if hints else "- Reflect the detected emotions naturally in speech"
     
     def _get_intention_action_hints(self, intentions: List[str]) -> str:
-        """
-        根据意图生成行动提示
-        """
         if not intentions:
             return "No specific intentions detected - respond to doctor's question"
         
@@ -223,9 +205,6 @@ The response must be at least 15 characters and show clear mental state reflecti
         return "\n".join(hints) if hints else "- Pursue the detected intentions naturally"
     
     def _get_gap_expression_hints(self, gaps: List[str]) -> str:
-        """
-        根据知识缺口生成表达提示
-        """
         if not gaps:
             return "No knowledge gaps detected - patient understands current information"
         
@@ -251,9 +230,6 @@ The response must be at least 15 characters and show clear mental state reflecti
         return "\n".join(hints)
     
     def _format_temporal_chain(self, chain: List) -> str:
-        """
-        格式化时序链用于提示
-        """
         formatted = []
         for link in chain[-5:]:
             formatted.append(
@@ -272,10 +248,6 @@ The response must be at least 15 characters and show clear mental state reflecti
         task_type: str,
         previous_trajectory: Optional[TemporalMentalTrajectory]
     ) -> str:
-        """
-        论文2要求：患者回复完全由动态时序心理状态驱动
-        禁止生成通用静态回复
-        """
         
         if not tom_reasoning.patient_mental_state or tom_reasoning.patient_mental_state.is_empty():
             return self._generate_fallback_response(dialogue_history, context)
@@ -284,7 +256,7 @@ The response must be at least 15 characters and show clear mental state reflecti
             tom_reasoning, context, dialogue_history, task_type, previous_trajectory
         )
         
-        max_attempts = 3
+        max_attempts = config.api.max_retries
         for attempt in range(max_attempts):
             try:
                 response = self.client.chat.completions.create(
@@ -297,11 +269,11 @@ The response must be at least 15 characters and show clear mental state reflecti
                 patient_response = response.choices[0].message.content.strip()
                 
                 if not self._validate_response_not_generic(patient_response):
-                    print(f"[WARNING] Generated generic response, regenerating (attempt {attempt + 1})")
+                    logger.warning(f"Generated generic response, regenerating (attempt {attempt + 1})")
                     continue
                 
                 if patient_response in self.response_history[-3:]:
-                    print(f"[WARNING] Repetitive response detected, regenerating (attempt {attempt + 1})")
+                    logger.warning(f"Repetitive response detected, regenerating (attempt {attempt + 1})")
                     continue
                 
                 self.response_history.append(patient_response)
@@ -311,7 +283,7 @@ The response must be at least 15 characters and show clear mental state reflecti
                 return patient_response
                 
             except Exception as e:
-                print(f"[ERROR] Patient simulation error: {e}")
+                logger.error(f"Patient simulation error: {e}")
                 if attempt == max_attempts - 1:
                     return self._generate_fallback_response(dialogue_history, context)
         
@@ -322,9 +294,6 @@ The response must be at least 15 characters and show clear mental state reflecti
         dialogue_history: List[DialogueTurn],
         context: Dict[str, Any]
     ) -> str:
-        """
-        生成后备回复，确保不是通用静态回复
-        """
         last_doctor_msg = ""
         for turn in reversed(dialogue_history):
             if turn.role == "assistant":
@@ -343,15 +312,5 @@ The response must be at least 15 characters and show clear mental state reflecti
         else:
             return "Thank you for explaining that. I'm still a bit unclear about what this means for me. Could you help me understand what I should do next?"
     
-    def _format_dialogue_history(self, dialogue_history: List[DialogueTurn]) -> str:
-        formatted = []
-        for turn in dialogue_history:
-            role_label = "DOCTOR" if turn.role == "assistant" else "PATIENT"
-            formatted.append(f"[Turn {turn.turn_number}] {role_label}: {turn.content}")
-        return "\n".join(formatted)
-    
     def get_response_history(self) -> List[str]:
-        """
-        获取回复历史，用于检测重复
-        """
         return self.response_history.copy()

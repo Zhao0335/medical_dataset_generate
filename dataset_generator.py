@@ -11,6 +11,7 @@ import re
 import time
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import asdict
+from contextlib import contextmanager
 
 from openai import OpenAI
 
@@ -26,35 +27,52 @@ from tom_models import (
 from tom_reasoning import ToMReasoningModule
 from patient_simulator import PatientMindSimulator
 from tom_goal_checker import ToMGoalChecker
+from config import config
+from utils import (
+    format_dialogue_history,
+    format_temporal_chain,
+    validate_api_key,
+    build_tom_annotation,
+    ConfigurationError,
+    ValidationError
+)
+from logger import get_logger
+
+logger = get_logger()
+
+
+@contextmanager
+def open_jsonl_files(output_dir: str, task_types: List[str]):
+    files = {}
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        for task in task_types:
+            file_path = os.path.join(output_dir, f"{task}_tom_dataset.jsonl")
+            files[task] = open(file_path, 'w', encoding='utf-8')
+        yield files
+    finally:
+        for f in files.values():
+            f.close()
 
 
 class MedicalDatasetGenerator:
     
     def __init__(self, api_key: str = None, base_url: str = None, model: str = "gpt-4"):
+        self.config = Config.from_args(api_key, base_url, model)
+        
+        is_valid, error_msg = validate_api_key(self.config.api.api_key)
+        if not is_valid:
+            raise ConfigurationError(f"API key validation failed: {error_msg}")
+        
         self.client = OpenAI(
-            api_key=api_key or os.environ.get("OPENAI_API_KEY"),
-            base_url=base_url or os.environ.get("OPENAI_BASE_URL")
+            api_key=self.config.api.api_key,
+            base_url=self.config.api.base_url
         )
-        self.model = model
+        self.model = self.config.api.model
         
-        self.tom_module = ToMReasoningModule(self.client, model)
-        self.patient_simulator = PatientMindSimulator(self.client, model)
+        self.tom_module = ToMReasoningModule(self.client, self.model)
+        self.patient_simulator = PatientMindSimulator(self.client, self.model)
         self.goal_checker = ToMGoalChecker()
-        
-        self.task_configs = {
-            TaskType.DIAGNOSIS.value: {
-                "system": "You are an experienced doctor using Theory of Mind for diagnosis.",
-                "required_info": ["symptoms", "duration", "severity", "medical history", "current medications"]
-            },
-            TaskType.MEDRECON.value: {
-                "system": "You are a clinical pharmacist using Theory of Mind for medication reconciliation.",
-                "required_info": ["current medications", "dosages", "frequency", "adherence", "side effects"]
-            },
-            TaskType.PRESCRIPTIONS.value: {
-                "system": "You are a physician using Theory of Mind for prescription writing.",
-                "required_info": ["diagnosis", "allergies", "current medications", "patient preferences"]
-            }
-        }
     
     def extract_patient_info(self, ehr_data: Dict) -> Dict[str, Any]:
         patient_info = {
@@ -121,15 +139,13 @@ class MedicalDatasetGenerator:
         tom_reasoning: ToMReasoning,
         task_type: str
     ) -> str:
-        """
-        论文要求：医生回复必须完全基于ToM推理结果
-        禁止ToM推理与回复脱节
-        """
         
-        config = self.task_configs.get(task_type, self.task_configs[TaskType.DIAGNOSIS.value])
+        task_config = self.config.task_configs.get(task_type)
+        if not task_config:
+            raise ValidationError(f"Unknown task type: {task_type}")
         
         if not tom_reasoning.has_valid_data():
-            print("[WARNING] ToM reasoning has no valid data, generating fallback response")
+            logger.warning("ToM reasoning has no valid data, generating fallback response")
             return self._generate_fallback_doctor_response(dialogue_history, task_type)
         
         error_corrections_summary = ""
@@ -143,10 +159,10 @@ ToM ERROR CORRECTIONS APPLIED:
         if tom_reasoning.temporal_chain_reasoning:
             temporal_chain_summary = f"""
 TEMPORAL CHAIN REASONING:
-{self._format_temporal_chain(tom_reasoning.temporal_chain_reasoning)}
+{format_temporal_chain(tom_reasoning.temporal_chain_reasoning)}
 """
         
-        prompt = f"""{config['system']}
+        prompt = f"""{task_config.system_prompt}
 
 === ToM REASONING RESULTS (MUST DRIVE YOUR RESPONSE) ===
 Step1 Decision: {"ToM invoked" if tom_reasoning.should_invoke_tom else "ToM not needed"}
@@ -175,7 +191,7 @@ Causal Trigger: {tom_reasoning.temporal_trajectory.causal_event.trigger_event if
 {tom_reasoning.next_action_strategy}
 
 === DIALOGUE HISTORY ===
-{self._format_dialogue_history(dialogue_history)}
+{format_dialogue_history(dialogue_history)}
 
 === CRITICAL INSTRUCTIONS ===
 Your response MUST be DIRECTLY DRIVEN by the ToM analysis above:
@@ -214,7 +230,7 @@ Do NOT include meta-commentary or explanations of your reasoning.
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"[ERROR] Doctor response generation error: {e}")
+            logger.error(f"Doctor response generation error: {e}")
             return self._generate_fallback_doctor_response(dialogue_history, task_type)
     
     def _generate_fallback_doctor_response(
@@ -222,9 +238,6 @@ Do NOT include meta-commentary or explanations of your reasoning.
         dialogue_history: List[DialogueTurn],
         task_type: str
     ) -> str:
-        """
-        生成后备医生回复
-        """
         last_patient_msg = ""
         for turn in reversed(dialogue_history):
             if turn.role == "user":
@@ -240,25 +253,16 @@ Do NOT include meta-commentary or explanations of your reasoning.
         else:
             return "Based on what we've discussed, let me explain the treatment options available to you."
     
-    def _format_temporal_chain(self, chain: List) -> str:
-        formatted = []
-        for link in chain[-5:]:
-            formatted.append(
-                f"Turn {link.turn_number}: {link.trigger_input}\n"
-                f"  → Observation: {link.observation}\n"
-                f"  → Inference: {link.inference}"
-            )
-        return "\n".join(formatted)
-    
     def generate_dialogue_with_tom(
         self,
         patient_info: Dict[str, Any],
         task_type: str,
-        max_turns: int = 12
+        max_turns: int = None
     ) -> Tuple[List[DialogueTurn], List[ToMReasoning]]:
-        """
-        论文核心：完整的双步骤ToM对话生成流程
-        """
+        
+        if max_turns is None:
+            max_turns = self.config.tom_thresholds.max_dialogue_turns
+        
         dialogue = []
         tom_reasonings = []
         
@@ -310,8 +314,8 @@ Do NOT include meta-commentary or explanations of your reasoning.
         if tom_reasoning.temporal_trajectory:
             previous_trajectory = tom_reasoning.temporal_trajectory
         
-        config = self.task_configs.get(task_type, self.task_configs[TaskType.DIAGNOSIS.value])
-        required_info = config.get("required_info", [])
+        task_config = self.config.task_configs.get(task_type)
+        required_info = task_config.required_info if task_config else []
         
         for turn_num in range(1, max_turns):
             patient_response = self.patient_simulator.generate_patient_response(
@@ -383,9 +387,6 @@ Do NOT include meta-commentary or explanations of your reasoning.
         task_type: str,
         goal_status: Dict[str, Any]
     ) -> str:
-        """
-        生成最终回复，确保患者知识缺口被覆盖
-        """
         
         final_prompts = {
             TaskType.DIAGNOSIS.value: "Based on our discussion and the information you've provided, here is my diagnosis and recommendation...",
@@ -393,7 +394,10 @@ Do NOT include meta-commentary or explanations of your reasoning.
             TaskType.PRESCRIPTIONS.value: "Based on your diagnosis and our discussion, here are the prescriptions I recommend..."
         }
         
-        prompt = f"""{self.task_configs[task_type]['system']}
+        task_config = self.config.task_configs.get(task_type)
+        system_prompt = task_config.system_prompt if task_config else ""
+        
+        prompt = f"""{system_prompt}
 
 === FINAL ToM SUMMARY ===
 Doctor's Known Info: {tom_reasoning.mental_boundary.doctor_known}
@@ -409,7 +413,7 @@ Doctor Info Complete: {goal_status.get('doctor_info_complete', False)} ({goal_st
 Patient Gaps Covered: {goal_status.get('patient_gaps_covered', False)} ({goal_status.get('patient_gap_coverage_score', 0):.0%})
 
 === DIALOGUE HISTORY ===
-{self._format_dialogue_history(dialogue_history)}
+{format_dialogue_history(dialogue_history)}
 
 Generate a final response that:
 1. Provides clear diagnosis/medication reconciliation/prescription
@@ -430,13 +434,8 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
+            logger.error(f"Final response generation error: {e}")
             return final_prompts.get(task_type, "Thank you for the consultation.")
-    
-    def _format_dialogue_history(self, dialogue_history: List[DialogueTurn]) -> str:
-        formatted = []
-        for turn in dialogue_history:
-            formatted.append(f"[Turn {turn.turn_number}] {turn.role.upper()}: {turn.content}")
-        return "\n".join(formatted)
     
     def extract_disease_from_ehr(self, ehr_data: Dict) -> str:
         input_text = ehr_data.get("input", "")
@@ -514,45 +513,9 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
                 "role": turn.role
             })
             
-            if turn.tom_reasoning:
-                tom_annotations.append({
-                    "turn_index": i,
-                    "turn_number": turn.turn_number,
-                    "step1_decision": {
-                        "should_invoke_tom": turn.tom_reasoning.should_invoke_tom,
-                        "dom_level": turn.tom_reasoning.dom_level,
-                        "decision_reason": turn.tom_reasoning.step1_decision_reason
-                    },
-                    "mental_boundary_separation": turn.tom_reasoning.mental_boundary.to_dict(),
-                    "patient_mental_state": turn.tom_reasoning.patient_mental_state.to_dict(),
-                    "patient_potential_intentions": turn.tom_reasoning.patient_potential_intentions,
-                    "temporal_trajectory": {
-                        "turn_number": turn.tom_reasoning.temporal_trajectory.turn_number if turn.tom_reasoning.temporal_trajectory else 0,
-                        "changes_from_previous": turn.tom_reasoning.temporal_trajectory.changes_from_previous if turn.tom_reasoning.temporal_trajectory else {},
-                        "causal_event": {
-                            "trigger": turn.tom_reasoning.temporal_trajectory.causal_event.trigger_event if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None,
-                            "trigger_type": turn.tom_reasoning.temporal_trajectory.causal_event.trigger_type if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None,
-                            "change_description": turn.tom_reasoning.temporal_trajectory.causal_event.change_description if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None,
-                            "belief_changes": turn.tom_reasoning.temporal_trajectory.causal_event.belief_changes if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else [],
-                            "emotion_changes": turn.tom_reasoning.temporal_trajectory.causal_event.emotion_changes if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else [],
-                            "intention_changes": turn.tom_reasoning.temporal_trajectory.causal_event.intention_changes if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else []
-                        } if turn.tom_reasoning.temporal_trajectory and turn.tom_reasoning.temporal_trajectory.causal_event else None,
-                        "temporal_chain": [link.to_dict() for link in turn.tom_reasoning.temporal_trajectory.temporal_chain] if turn.tom_reasoning.temporal_trajectory else [],
-                        "anchored_history": turn.tom_reasoning.temporal_trajectory.anchored_history if turn.tom_reasoning.temporal_trajectory else []
-                    },
-                    "temporal_chain_reasoning": [link.to_dict() for link in turn.tom_reasoning.temporal_chain_reasoning],
-                    "tom_errors_detected": [
-                        {
-                            "error_type": e.error_type.value,
-                            "description": e.error_description,
-                            "correction": e.correction_applied,
-                            "corrected": e.corrected,
-                            "original_value": str(e.original_value)[:100] if e.original_value else None,
-                            "corrected_value": str(e.corrected_value)[:100] if e.corrected_value else None
-                        } for e in turn.tom_reasoning.tom_errors_detected
-                    ],
-                    "next_action_strategy": turn.tom_reasoning.next_action_strategy
-                })
+            annotation = build_tom_annotation(i, turn)
+            if annotation:
+                tom_annotations.append(annotation)
         
         ability_map = {
             TaskType.DIAGNOSIS.value: "medical_diagnosis_with_tom",
@@ -581,65 +544,58 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
         output_dir: str,
         task_types: List[str] = None,
         max_samples: int = None,
-        delay: float = 2.0
+        delay: float = None
     ):
         
         if task_types is None:
             task_types = [TaskType.DIAGNOSIS.value, TaskType.MEDRECON.value, TaskType.PRESCRIPTIONS.value]
         
-        os.makedirs(output_dir, exist_ok=True)
+        if delay is None:
+            delay = self.config.api.delay
         
-        output_files = {
-            task: open(os.path.join(output_dir, f"{task}_tom_dataset.jsonl"), 'w', encoding='utf-8')
-            for task in task_types
-        }
-        
-        with open(input_file, 'r', encoding='utf-8') as f:
-            for idx, line in enumerate(f):
-                if max_samples and idx >= max_samples:
-                    break
-                
-                try:
-                    ehr_data = json.loads(line.strip())
-                    print(f"\n{'='*60}")
-                    print(f"Processing sample {idx + 1}...")
-                    print(f"Chief Complaint: {self.extract_patient_info(ehr_data).get('chief_complaint', 'Unknown')}")
+        with open_jsonl_files(output_dir, task_types) as output_files:
+            with open(input_file, 'r', encoding='utf-8') as f:
+                for idx, line in enumerate(f):
+                    if max_samples and idx >= max_samples:
+                        break
                     
-                    for task_type in task_types:
-                        print(f"\n  [{task_type.upper()}] Generating ToM-based dialogue...")
-                        sample = self.generate_single_sample(ehr_data, task_type)
+                    try:
+                        ehr_data = json.loads(line.strip())
+                        logger.info(f"Processing sample {idx + 1}...")
+                        logger.info(f"Chief Complaint: {self.extract_patient_info(ehr_data).get('chief_complaint', 'Unknown')}")
                         
-                        if sample:
-                            output_files[task_type].write(
-                                json.dumps(asdict(sample), ensure_ascii=False) + '\n'
-                            )
-                            print(f"  [{task_type.upper()}] Generated {len(sample.prompt)} dialogue turns")
-                            print(f"  [{task_type.upper()}] ToM annotations: {len(sample.tom_annotations)}")
+                        for task_type in task_types:
+                            logger.info(f"[{task_type.upper()}] Generating ToM-based dialogue...")
+                            sample = self.generate_single_sample(ehr_data, task_type)
                             
-                            if sample.tom_annotations:
-                                errors_count = sum(
-                                    len(ann.get('tom_errors_detected', [])) 
-                                    for ann in sample.tom_annotations
+                            if sample:
+                                output_files[task_type].write(
+                                    json.dumps(asdict(sample), ensure_ascii=False) + '\n'
                                 )
-                                print(f"  [{task_type.upper()}] ToM errors detected & corrected: {errors_count}")
+                                logger.info(f"[{task_type.upper()}] Generated {len(sample.prompt)} dialogue turns")
+                                logger.info(f"[{task_type.upper()}] ToM annotations: {len(sample.tom_annotations)}")
                                 
-                                dom_levels = [ann.get('step1_decision', {}).get('dom_level', 0) 
-                                            for ann in sample.tom_annotations]
-                                print(f"  [{task_type.upper()}] DoM levels used: {set(dom_levels)}")
-                        
-                        time.sleep(delay)
-                        
-                except Exception as e:
-                    print(f"[ERROR] Processing sample {idx}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
+                                if sample.tom_annotations:
+                                    errors_count = sum(
+                                        len(ann.get('tom_errors_detected', [])) 
+                                        for ann in sample.tom_annotations
+                                    )
+                                    logger.info(f"[{task_type.upper()}] ToM errors detected & corrected: {errors_count}")
+                                    
+                                    dom_levels = [ann.get('step1_decision', {}).get('dom_level', 0) 
+                                                for ann in sample.tom_annotations]
+                                    logger.info(f"[{task_type.upper()}] DoM levels used: {set(dom_levels)}")
+                            
+                            time.sleep(delay)
+                            
+                    except Exception as e:
+                        logger.error(f"Processing sample {idx}: {e}")
+                        continue
         
-        for f in output_files.values():
-            f.close()
-        
-        print(f"\n{'='*60}")
-        print("ToM-based dataset generation completed!")
-        print(f"Output files saved to: {output_dir}")
+        logger.info("ToM-based dataset generation completed!")
+        logger.info(f"Output files saved to: {output_dir}")
         for task in task_types:
-            print(f"  - {task}_tom_dataset.jsonl")
+            logger.info(f"  - {task}_tom_dataset.jsonl")
+
+
+from config import Config

@@ -25,6 +25,16 @@ from tom_models import (
     TaskType
 )
 from tom_error_detector import ToMErrorDetector
+from config import (
+    config,
+    FIRST_ORDER_SIGNALS,
+    NEEDS_TOM_SIGNALS,
+    SIMPLE_ACKNOWLEDGMENT_PATTERNS
+)
+from utils import format_dialogue_history, safe_json_loads, APIError
+from logger import get_logger
+
+logger = get_logger()
 
 
 class ToMReasoningModule:
@@ -41,11 +51,6 @@ class ToMReasoningModule:
         dialogue_history: List[DialogueTurn],
         task_type: str
     ) -> int:
-        """
-        论文1要求：自适应DoM选择
-        医疗问诊=合作场景→自动选择0阶或1阶，禁止高阶
-        基于对话复杂度和患者信号动态决定
-        """
         if len(dialogue_history) <= 1:
             return DoMLevel.ZERO_ORDER.value
         
@@ -55,13 +60,7 @@ class ToMReasoningModule:
         
         last_utterance = patient_utterances[-1].lower()
         
-        first_order_signals = [
-            'but', 'however', 'worried', 'concerned', 'afraid', 'confused',
-            'hesitant', 'not sure', 'i think', 'i feel', 'maybe',
-            '但是', '不过', '担心', '害怕', '顾虑', '困惑', '犹豫', '不确定', '觉得', '感觉'
-        ]
-        
-        has_first_order_signal = any(signal in last_utterance for signal in first_order_signals)
+        has_first_order_signal = any(signal in last_utterance for signal in FIRST_ORDER_SIGNALS)
         
         if has_first_order_signal:
             return DoMLevel.FIRST_ORDER.value
@@ -85,11 +84,6 @@ class ToMReasoningModule:
         dialogue_history: List[DialogueTurn],
         task_type: str
     ) -> Tuple[bool, int, str]:
-        """
-        论文1核心：Step1自主决策是否调用ToM
-        必须真实判断，可返回should_invoke_tom=False
-        绝不强制永远调用
-        """
         if len(dialogue_history) == 0:
             return True, 0, "Initial consultation: ToM required to establish patient baseline mental state"
         
@@ -99,15 +93,9 @@ class ToMReasoningModule:
         
         last_patient_utterance = patient_utterances[-1].strip()
         
-        simple_acknowledgment_patterns = [
-            r'^(ok|okay|yes|no|sure|alright|好的|是的|没有|行|明白).?$',
-            r'^(thank you|thanks|谢谢|感谢).?$',
-            r'^.{1,3}$'
-        ]
-        
         is_simple_acknowledgment = any(
             re.match(pattern, last_patient_utterance, re.IGNORECASE)
-            for pattern in simple_acknowledgment_patterns
+            for pattern in SIMPLE_ACKNOWLEDGMENT_PATTERNS
         )
         
         if is_simple_acknowledgment and len(patient_utterances) > 3:
@@ -115,13 +103,7 @@ class ToMReasoningModule:
         
         dom_level = self._determine_adaptive_dom(context, dialogue_history, task_type)
         
-        needs_tom_signals = [
-            '?', 'worried', 'concerned', 'afraid', 'confused', 'don\'t know',
-            'but', 'however', 'maybe', 'think', 'feel', 'pain', 'hurt',
-            '？', '担心', '害怕', '困惑', '不知道', '但是', '觉得', '感觉', '痛', '疼'
-        ]
-        
-        needs_tom = any(signal in last_patient_utterance.lower() for signal in needs_tom_signals)
+        needs_tom = any(signal in last_patient_utterance.lower() for signal in NEEDS_TOM_SIGNALS)
         
         if needs_tom:
             return True, dom_level, f"ToM required: Patient utterance contains mental state signals (DoM={dom_level})"
@@ -138,10 +120,6 @@ class ToMReasoningModule:
         context: Dict[str, Any],
         dom_level: int
     ) -> str:
-        """
-        构建时序链式推理提示
-        禁用普通CoT，强制时序链式推理
-        """
         anchored_history = ""
         if previous_trajectory and previous_trajectory.anchored_history:
             anchored_history = f"""
@@ -188,7 +166,7 @@ DoM Level: {dom_level} (0=direct observation, 1=patient's perspective)
 {previous_state}
 
 === CURRENT DIALOGUE ===
-{self._format_dialogue_history(dialogue_history)}
+{format_dialogue_history(dialogue_history)}
 
 === PATIENT BACKGROUND ===
 {json.dumps(context.get('patient_info', {}), indent=2, ensure_ascii=False)}
@@ -286,13 +264,6 @@ OUTPUT FORMAT (JSON):
         task_type: str,
         previous_trajectory: Optional[TemporalMentalTrajectory]
     ) -> ToMReasoning:
-        """
-        论文1+2核心：Step2心理状态推理
-        - 严格心智边界隔离
-        - 时序链式推理（非普通CoT）
-        - 因果触发链
-        - 解决中间丢失问题
-        """
         
         prompt = self._build_temporal_chain_prompt(
             dialogue_history, previous_trajectory, context, dom_level
@@ -302,11 +273,13 @@ OUTPUT FORMAT (JSON):
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=2500,
-                temperature=0.3
+                max_tokens=config.api.max_tokens,
+                temperature=config.api.temperature
             )
             
-            result = json.loads(response.choices[0].message.content)
+            result = safe_json_loads(response.choices[0].message.content)
+            if not result:
+                raise APIError("Failed to parse LLM response as JSON")
             
             mental_boundary = MentalBoundary(
                 doctor_known=result.get("mental_boundary", {}).get("doctor_known", []),
@@ -317,7 +290,7 @@ OUTPUT FORMAT (JSON):
             
             boundary_errors = mental_boundary.validate_separation()
             if boundary_errors:
-                print(f"[WARNING] Mental boundary validation: {boundary_errors}")
+                logger.warning(f"Mental boundary validation: {boundary_errors}")
             
             mental_state = MentalState(
                 beliefs=result.get("patient_mental_state", {}).get("beliefs", []),
@@ -411,11 +384,11 @@ OUTPUT FORMAT (JSON):
                 temporal_chain_reasoning=temporal_chain_links
             )
             
+        except APIError as e:
+            logger.error(f"API error in mental state inference: {e}")
+            raise
         except Exception as e:
-            print(f"[ERROR] Mental state inference failed: {e}")
-            import traceback
-            traceback.print_exc()
-            
+            logger.error(f"Mental state inference failed: {e}")
             return ToMReasoning(
                 should_invoke_tom=True,
                 dom_level=dom_level,
@@ -423,12 +396,3 @@ OUTPUT FORMAT (JSON):
                 mental_boundary=MentalBoundary(),
                 patient_mental_state=MentalState()
             )
-    
-    def _format_dialogue_history(self, dialogue_history: List[DialogueTurn]) -> str:
-        formatted = []
-        for turn in dialogue_history:
-            role_label = "DOCTOR" if turn.role == "assistant" else "PATIENT"
-            formatted.append(f"[Turn {turn.turn_number}] {role_label}: {turn.content}")
-        return "\n".join(formatted)
-    
-
