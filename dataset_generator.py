@@ -23,6 +23,9 @@ from tom_models import (
     ToMReasoning,
 )
 from tom_reasoning import ToMReasoningModule
+from patient_simulator import PatientMindSimulator
+from tom_goal_checker import ToMGoalChecker
+from config import Config
 from utils import (
     ConfigurationError,
     ValidationError,
@@ -30,6 +33,7 @@ from utils import (
     format_dialogue_history,
     format_temporal_chain,
 )
+from logger import get_logger
 
 logger = get_logger()
 
@@ -93,47 +97,40 @@ class MedicalDatasetGenerator:
         # 获取完整的 EHR 数据
         ehr_input = context.get("input_text", "")
         
+        # 构建对话历史字符串
+        dialogue_history_str = format_dialogue_history(dialogue_history)
+        
         # 构建端到端的 ToM 驱动对话生成提示
-        prompt = f"""{task_config.system_prompt}
-
-You are a medical professional using Theory of Mind (ToM) to provide empathetic, patient-centered care.
-
-=== PATIENT EHR DATA ===
-{ehr_input}
-
-=== CURRENT DIALOGUE ===
-{format_dialogue_history(dialogue_history)}
-
-=== YOUR ROLE ===
-Based on the patient's EHR data and the dialogue history, you must:
-
-1. ANALYZE PATIENT's MENTAL STATE:
-   - Beliefs: What does the patient believe about their condition?
-   - Emotions: What is the patient feeling right now?
-   - Intentions: What does the patient want to achieve?
-   - Knowledge Gaps: What does the patient not understand?
-
-2. PERFORM TEMPORAL CHAIN REASONING:
-   - Track how the patient's mental state has evolved
-   - Identify causal events that changed their mental state
-   - Understand the temporal progression of their concerns
-
-3. GENERATE TO M-DRIVEN RESPONSE:
-   - Address the patient's knowledge gaps with clear explanations
-   - Respond to their emotions with empathy
-   - Help them achieve their intentions
-   - Gather any missing information needed for diagnosis/treatment
-   - Make medically appropriate recommendations based on EHR data
-
-4. MAINTAIN NATURAL DIALOGUE:
-   - Speak in a natural, conversational tone
-   - Avoid jargon and technical language
-   - Show genuine concern and understanding
-   - Adapt your response to the patient's emotional state
-
-OUTPUT: Your response to the patient (natural, empathetic, ToM-driven)
-Do NOT include meta-commentary or explanations of your reasoning.
-"""
+        prompt = task_config.system_prompt + "\n\n"
+        prompt += "You are a medical professional using Theory of Mind (ToM) to provide empathetic, patient-centered care.\n\n"
+        prompt += "=== PATIENT EHR DATA ===\n"
+        prompt += ehr_input + "\n\n"
+        prompt += "=== CURRENT DIALOGUE ===\n"
+        prompt += dialogue_history_str + "\n\n"
+        prompt += "=== YOUR ROLE ===\n"
+        prompt += "Based on the patient's EHR data and the dialogue history, you must:\n\n"
+        prompt += "1. ANALYZE PATIENT's MENTAL STATE:\n"
+        prompt += "   - Beliefs: What does the patient believe about their condition?\n"
+        prompt += "   - Emotions: What is the patient feeling right now?\n"
+        prompt += "   - Intentions: What does the patient want to achieve?\n"
+        prompt += "   - Knowledge Gaps: What does the patient not understand?\n\n"
+        prompt += "2. PERFORM TEMPORAL CHAIN REASONING:\n"
+        prompt += "   - Track how the patient's mental state has evolved\n"
+        prompt += "   - Identify causal events that changed their mental state\n"
+        prompt += "   - Understand the temporal progression of their concerns\n\n"
+        prompt += "3. GENERATE TO M-DRIVEN RESPONSE:\n"
+        prompt += "   - Address the patient's knowledge gaps with clear explanations\n"
+        prompt += "   - Respond to their emotions with empathy\n"
+        prompt += "   - Help them achieve their intentions\n"
+        prompt += "   - Gather any missing information needed for diagnosis/treatment\n"
+        prompt += "   - Make medically appropriate recommendations based on EHR data\n\n"
+        prompt += "4. MAINTAIN NATURAL DIALOGUE:\n"
+        prompt += "   - Speak in a natural, conversational tone\n"
+        prompt += "   - Avoid jargon and technical language\n"
+        prompt += "   - Show genuine concern and understanding\n"
+        prompt += "   - Adapt your response to the patient's emotional state\n\n"
+        prompt += "OUTPUT: Your response to the patient (natural, empathetic, ToM-driven)\n"
+        prompt += "Do NOT include meta-commentary or explanations of your reasoning.\n"
 
         try:
             response = self.llm_provider.generate_chat(
@@ -174,13 +171,11 @@ Do NOT include meta-commentary or explanations of your reasoning.
         
         # 使用 LLM 生成初始医生开场
         ehr_input = ehr_data.get("input", "")
-        initial_prompt = f"""You are a doctor starting a consultation with a patient. Based on the patient's EHR data, generate a natural, empathetic opening question.
-
-=== PATIENT EHR DATA ===
-{ehr_input}
-
-OUTPUT: Your opening question to the patient (natural, empathetic, focused on the chief complaint)
-"""
+        # 构建初始医生开场提示
+        initial_prompt = "You are a doctor starting a consultation with a patient. Based on the patient's EHR data, generate a natural, empathetic opening question.\n\n"
+        initial_prompt += "=== PATIENT EHR DATA ===\n"
+        initial_prompt += ehr_input + "\n\n"
+        initial_prompt += "OUTPUT: Your opening question to the patient (natural, empathetic, focused on the chief complaint)\n"
         
         try:
             response = self.llm_provider.generate_chat(
@@ -277,42 +272,39 @@ OUTPUT: Your opening question to the patient (natural, empathetic, focused on th
             
             # LLM 评估目标达成情况
             ehr_input = context.get("input_text", "")
-            goal_prompt = f"""Evaluate if the medical consultation has achieved its goals:
-
-=== PATIENT EHR DATA ===
-{ehr_input}
-
-=== DIALOGUE HISTORY ===
-{format_dialogue_history(dialogue)}
-
-=== PATIENT'S MENTAL STATE ===
-Beliefs: {tom_reasoning.patient_mental_state.beliefs}
-Emotions: {tom_reasoning.patient_mental_state.emotions}
-Intentions: {tom_reasoning.patient_mental_state.intentions}
-Knowledge Gaps: {tom_reasoning.patient_mental_state.knowledge_gaps}
-
-=== TASK TYPE ===
-{task_type}
-
-Evaluate:
-1. Has the doctor gathered sufficient information?
-2. Have the patient's knowledge gaps been addressed?
-3. Have the patient's intentions been fulfilled?
-4. Is the patient's emotional state positive?
-5. Should the consultation conclude?
-
-OUTPUT:
-{
-    "goal_achieved": true/false,
-    "reason": "detailed explanation",
-    "goal_status": {
-        "doctor_info_complete": true/false,
-        "patient_gaps_covered": true/false,
-        "intentions_fulfilled": true/false,
-        "emotional_state_positive": true/false
-    }
-}
-"""
+            # 构建对话历史字符串
+            dialogue_history_str = format_dialogue_history(dialogue)
+            
+            # 构建目标检查提示
+            goal_prompt = "Evaluate if the medical consultation has achieved its goals:\n\n"
+            goal_prompt += "=== PATIENT EHR DATA ===\n"
+            goal_prompt += ehr_input + "\n\n"
+            goal_prompt += "=== DIALOGUE HISTORY ===\n"
+            goal_prompt += dialogue_history_str + "\n\n"
+            goal_prompt += "=== PATIENT'S MENTAL STATE ===\n"
+            goal_prompt += "Beliefs: " + str(tom_reasoning.patient_mental_state.beliefs) + "\n"
+            goal_prompt += "Emotions: " + str(tom_reasoning.patient_mental_state.emotions) + "\n"
+            goal_prompt += "Intentions: " + str(tom_reasoning.patient_mental_state.intentions) + "\n"
+            goal_prompt += "Knowledge Gaps: " + str(tom_reasoning.patient_mental_state.knowledge_gaps) + "\n\n"
+            goal_prompt += "=== TASK TYPE ===\n"
+            goal_prompt += task_type + "\n\n"
+            goal_prompt += "Evaluate:\n"
+            goal_prompt += "1. Has the doctor gathered sufficient information?\n"
+            goal_prompt += "2. Have the patient's knowledge gaps been addressed?\n"
+            goal_prompt += "3. Have the patient's intentions been fulfilled?\n"
+            goal_prompt += "4. Is the patient's emotional state positive?\n"
+            goal_prompt += "5. Should the consultation conclude?\n\n"
+            goal_prompt += "OUTPUT:\n"
+            goal_prompt += "{\n"
+            goal_prompt += "    \"goal_achieved\": true/false,\n"
+            goal_prompt += "    \"reason\": \"detailed explanation\",\n"
+            goal_prompt += "    \"goal_status\": {\n"
+            goal_prompt += "        \"doctor_info_complete\": true/false,\n"
+            goal_prompt += "        \"patient_gaps_covered\": true/false,\n"
+            goal_prompt += "        \"intentions_fulfilled\": true/false,\n"
+            goal_prompt += "        \"emotional_state_positive\": true/false\n"
+            goal_prompt += "    }\n"
+            goal_prompt += "}\n"
             
             goal_achieved = False
             goal_status = {}
@@ -332,24 +324,22 @@ OUTPUT:
             
             if goal_achieved:
                 # LLM 生成最终响应
-                final_prompt = f"""Generate a final summary response for the medical consultation:
-
-=== PATIENT EHR DATA ===
-{ehr_input}
-
-=== DIALOGUE HISTORY ===
-{format_dialogue_history(dialogue)}
-
-=== PATIENT'S MENTAL STATE ===
-Beliefs: {tom_reasoning.patient_mental_state.beliefs}
-Emotions: {tom_reasoning.patient_mental_state.emotions}
-Intentions: {tom_reasoning.patient_mental_state.intentions}
-
-=== GOAL STATUS ===
-{json.dumps(goal_status, indent=2)}
-
-OUTPUT: Your final summary and recommendations to the patient (natural, empathetic, comprehensive)
-"""
+                # 构建对话历史字符串
+                dialogue_history_str = format_dialogue_history(dialogue)
+                
+                # 构建最终提示
+                final_prompt = "Generate a final summary response for the medical consultation:\n\n"
+                final_prompt += "=== PATIENT EHR DATA ===\n"
+                final_prompt += ehr_input + "\n\n"
+                final_prompt += "=== COMPLETE DIALOGUE ===\n"
+                final_prompt += dialogue_history_str + "\n\n"
+                final_prompt += "=== PATIENT'S MENTAL STATE ===\n"
+                final_prompt += "Beliefs: " + str(tom_reasoning.patient_mental_state.beliefs) + "\n"
+                final_prompt += "Emotions: " + str(tom_reasoning.patient_mental_state.emotions) + "\n"
+                final_prompt += "Intentions: " + str(tom_reasoning.patient_mental_state.intentions) + "\n\n"
+                final_prompt += "=== GOAL STATUS ===\n"
+                final_prompt += json.dumps(goal_status, indent=2) + "\n\n"
+                final_prompt += "OUTPUT: Your final summary and recommendations to the patient (natural, empathetic, comprehensive)\n"
                 
                 try:
                     final_response = self.llm_provider.generate_chat(
@@ -394,13 +384,11 @@ OUTPUT: Your final summary and recommendations to the patient (natural, empathet
         """
         input_text = ehr_data.get("input", "")
         
-        prompt = f"""Extract the primary disease or chief complaint from the patient's EHR data:
-
-=== EHR DATA ===
-{input_text}
-
-Output only the primary disease or chief complaint, without any additional text.
-"""
+        # 构建疾病提取提示
+        prompt = "Extract the primary disease or chief complaint from the patient's EHR data:\n\n"
+        prompt += "=== EHR DATA ===\n"
+        prompt += input_text + "\n\n"
+        prompt += "Output only the primary disease or chief complaint, without any additional text.\n"
         
         try:
             response = self.llm_provider.generate_chat(
@@ -420,22 +408,18 @@ Output only the primary disease or chief complaint, without any additional text.
         """
         input_text = ehr_data.get("input", "")
         
-        prompt = f"""Based on the patient's disease and EHR data, determine the most appropriate medical department and subdepartment:
-
-=== PATIENT DISEASE ===
-{disease}
-
-=== EHR DATA ===
-{input_text}
-
-Output format:
-Department: [Main Department]
-Subdepartment: [Subdepartment]
-
-Example:
-Department: Cardiology
-Subdepartment: Cardiovascular Medicine
-"""
+        # 构建科室判断提示
+        prompt = "Based on the patient's disease and EHR data, determine the most appropriate medical department and subdepartment:\n\n"
+        prompt += "=== PATIENT DISEASE ===\n"
+        prompt += disease + "\n\n"
+        prompt += "=== EHR DATA ===\n"
+        prompt += input_text + "\n\n"
+        prompt += "Output format:\n"
+        prompt += "Department: [Main Department]\n"
+        prompt += "Subdepartment: [Subdepartment]\n\n"
+        prompt += "Example:\n"
+        prompt += "Department: Cardiology\n"
+        prompt += "Subdepartment: Cardiovascular Medicine\n"
         
         try:
             response = self.llm_provider.generate_chat(
@@ -547,8 +531,9 @@ Subdepartment: Cardiovascular Medicine
                     try:
                         ehr_data = json.loads(line.strip())
                         logger.info(f"Processing sample {idx + 1}...")
+                        disease = self.extract_disease_from_ehr(ehr_data)
                         logger.info(
-                            f"Chief Complaint: {self.extract_patient_info(ehr_data).get('chief_complaint', 'Unknown')}"
+                            f"Chief Complaint: {disease}"
                         )
 
                         for task_type in task_types:

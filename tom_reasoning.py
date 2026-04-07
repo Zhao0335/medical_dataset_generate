@@ -162,96 +162,82 @@ OUTPUT FORMAT (JSON):
         # 构建之前的心智状态信息
         previous_state_info = ""
         if previous_trajectory:
-            previous_state_info = f"""
-=== PREVIOUS MENTAL STATE ===
-- Beliefs: {previous_trajectory.mental_state.beliefs}
-- Emotions: {previous_trajectory.mental_state.emotions}
-- Intentions: {previous_trajectory.mental_state.intentions}
-- Knowledge Gaps: {previous_trajectory.mental_state.knowledge_gaps}
-"""
+            previous_state_info = "\n=== PREVIOUS MENTAL STATE ===\n- Beliefs: " + str(previous_trajectory.mental_state.beliefs) + "\n- Emotions: " + str(previous_trajectory.mental_state.emotions) + "\n- Intentions: " + str(previous_trajectory.mental_state.intentions) + "\n- Knowledge Gaps: " + str(previous_trajectory.mental_state.knowledge_gaps) + "\n"
+        
+        # 构建对话历史字符串
+        dialogue_history_str = format_dialogue_history(dialogue_history)
         
         # 构建端到端的 ToM 推理提示
-        prompt = f"""You are performing Step2 Theory of Mind (ToM) mental state inference for medical consultation.
-
-=== PATIENT EHR DATA ===
-{ehr_input}
-
-=== CURRENT DIALOGUE ===
-{format_dialogue_history(dialogue_history)}
-
-{previous_state_info}
-
-=== YOUR TASK ===
-Perform comprehensive mental state inference based on the DoM level:
-
-1. MENTAL BOUNDARY SEPARATION (Strict Isolation):
-   - DOCTOR's Known Info: What the doctor knows from EHR and dialogue
-   - DOCTOR's Unknown Info: What the doctor still needs to find out
-   - PATIENT's Known Info: What the patient understands about their condition
-   - PATIENT's Knowledge Gaps: What the patient doesn't understand
-
-2. PATIENT's CURRENT MENTAL STATE:
-   - Beliefs: What the patient believes about their condition
-   - Emotions: What the patient is feeling right now
-   - Intentions: What the patient wants to achieve
-   - Knowledge Gaps: What the patient doesn't understand
-
-3. DYNAMIC TEMPORAL TRAJECTORY:
-   - How the patient's mental state has evolved from previous turn
-   - Causal event that triggered the change
-   - Temporal chain of mental state changes
-
-4. PATIENT's POTENTIAL INTENTIONS:
-   - Primary intentions the patient is pursuing
-   - Hidden concerns or fears
-   - Information seeking goals
-
-5. NEXT ACTION STRATEGY:
-   - Based on mental state analysis
-   - Address knowledge gaps
-   - Respond to emotions
-   - Gather missing information
-
-OUTPUT FORMAT (JSON):
-{
-    "mental_boundary": {
-        "doctor_known": ["confirmed fact 1", "confirmed fact 2"],
-        "doctor_unknown": ["needed info 1", "needed info 2"],
-        "patient_known": ["patient knows 1", "patient knows 2"],
-        "patient_knowledge_gaps": ["gap 1", "gap 2"]
-    },
-    "patient_mental_state": {
-        "beliefs": ["current belief 1", "current belief 2"],
-        "emotions": ["current emotion 1", "current emotion 2"],
-        "intentions": ["current intention 1", "current intention 2"],
-        "knowledge_gaps": ["current gap 1", "current gap 2"]
-    },
-    "temporal_trajectory": {
-        "changes_from_previous": {
-            "beliefs": ["belief changes"],
-            "emotions": ["emotion changes"],
-            "intentions": ["intention changes"],
-            "knowledge_gaps": ["knowledge gap changes"]
-        },
-        "causal_event": {
-            "trigger_event": "specific event that caused change",
-            "trigger_type": "question|explanation|test result|medication discussion",
-            "change_description": "what changed and why"
-        },
-        "temporal_chain": [
-            {
-                "turn_number": 1,
-                "trigger_input": "what triggered this change",
-                "observation": "what was observed",
-                "inference": "what mental state was inferred",
-                "mental_state_delta": "how mental state changed"
-            }
-        ]
-    },
-    "patient_potential_intentions": ["intention 1", "intention 2"],
-    "next_action_strategy": "detailed strategy based on analysis"
-}
-"""
+        prompt = "You are performing Step2 Theory of Mind (ToM) mental state inference for medical consultation.\n\n"
+        prompt += "=== PATIENT EHR DATA ===\n"
+        prompt += ehr_input + "\n\n"
+        prompt += "=== CURRENT DIALOGUE ===\n"
+        prompt += dialogue_history_str + "\n"
+        prompt += previous_state_info + "\n"
+        prompt += "=== YOUR TASK ===\n"
+        prompt += "Perform comprehensive mental state inference based on the DoM level:\n\n"
+        prompt += "1. MENTAL BOUNDARY SEPARATION (Strict Isolation):\n"
+        prompt += "   - DOCTOR's Known Info: What the doctor knows from EHR and dialogue\n"
+        prompt += "   - DOCTOR's Unknown Info: What the doctor still needs to find out\n"
+        prompt += "   - PATIENT's Known Info: What the patient understands about their condition\n"
+        prompt += "   - PATIENT's Knowledge Gaps: What the patient doesn't understand\n\n"
+        prompt += "2. PATIENT's CURRENT MENTAL STATE:\n"
+        prompt += "   - Beliefs: What the patient believes about their condition\n"
+        prompt += "   - Emotions: What the patient is feeling right now\n"
+        prompt += "   - Intentions: What the patient wants to achieve\n"
+        prompt += "   - Knowledge Gaps: What the patient doesn't understand\n\n"
+        prompt += "3. DYNAMIC TEMPORAL TRAJECTORY:\n"
+        prompt += "   - How the patient's mental state has evolved from previous turn\n"
+        prompt += "   - Causal event that triggered the change\n"
+        prompt += "   - Temporal chain of mental state changes\n\n"
+        prompt += "4. PATIENT's POTENTIAL INTENTIONS:\n"
+        prompt += "   - Primary intentions the patient is pursuing\n"
+        prompt += "   - Hidden concerns or fears\n"
+        prompt += "   - Information seeking goals\n\n"
+        prompt += "5. NEXT ACTION STRATEGY:\n"
+        prompt += "   - Based on mental state analysis\n"
+        prompt += "   - Address knowledge gaps\n"
+        prompt += "   - Respond to emotions\n"
+        prompt += "   - Gather missing information\n\n"
+        prompt += "OUTPUT FORMAT (JSON):\n"
+        prompt += "{\n"
+        prompt += "    \"mental_boundary\": {\n"
+        prompt += "        \"doctor_known\": [\"confirmed fact 1\", \"confirmed fact 2\"],\n"
+        prompt += "        \"doctor_unknown\": [\"needed info 1\", \"needed info 2\"],\n"
+        prompt += "        \"patient_known\": [\"patient knows 1\", \"patient knows 2\"],\n"
+        prompt += "        \"patient_knowledge_gaps\": [\"gap 1\", \"gap 2\"]\n"
+        prompt += "    },\n"
+        prompt += "    \"patient_mental_state\": {\n"
+        prompt += "        \"beliefs\": [\"current belief 1\", \"current belief 2\"],\n"
+        prompt += "        \"emotions\": [\"current emotion 1\", \"current emotion 2\"],\n"
+        prompt += "        \"intentions\": [\"current intention 1\", \"current intention 2\"],\n"
+        prompt += "        \"knowledge_gaps\": [\"current gap 1\", \"current gap 2\"]\n"
+        prompt += "    },\n"
+        prompt += "    \"temporal_trajectory\": {\n"
+        prompt += "        \"changes_from_previous\": {\n"
+        prompt += "            \"beliefs\": [\"belief changes\"],\n"
+        prompt += "            \"emotions\": [\"emotion changes\"],\n"
+        prompt += "            \"intentions\": [\"intention changes\"],\n"
+        prompt += "            \"knowledge_gaps\": [\"knowledge gap changes\"]\n"
+        prompt += "        },\n"
+        prompt += "        \"causal_event\": {\n"
+        prompt += "            \"trigger_event\": \"specific event that caused change\",\n"
+        prompt += "            \"trigger_type\": \"question|explanation|test result|medication discussion\",\n"
+        prompt += "            \"change_description\": \"what changed and why\"\n"
+        prompt += "        },\n"
+        prompt += "        \"temporal_chain\": [\n"
+        prompt += "            {\n"
+        prompt += "                \"turn_number\": 1,\n"
+        prompt += "                \"trigger_input\": \"what triggered this change\",\n"
+        prompt += "                \"observation\": \"what was observed\",\n"
+        prompt += "                \"inference\": \"what mental state was inferred\",\n"
+        prompt += "                \"mental_state_delta\": \"how mental state changed\"\n"
+        prompt += "            }\n"
+        prompt += "        ]\n"
+        prompt += "    },\n"
+        prompt += "    \"patient_potential_intentions\": [\"intention 1\", \"intention 2\"],\n"
+        prompt += "    \"next_action_strategy\": \"detailed strategy based on analysis\"\n"
+        prompt += "}\n"
         
         try:
             response = self.llm_provider.generate_chat(

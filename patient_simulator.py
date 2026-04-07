@@ -51,10 +51,7 @@ class PatientMindSimulator:
 
         temporal_evolution = ""
         if trajectory and trajectory.temporal_chain:
-            temporal_evolution = f"""
-=== TEMPORAL MENTAL EVOLUTION ===
-{format_temporal_chain(trajectory.temporal_chain)}
-"""
+            temporal_evolution = "\n=== TEMPORAL MENTAL EVOLUTION ===\n" + format_temporal_chain(trajectory.temporal_chain) + "\n"
 
         previous_context = ""
         if previous_trajectory and previous_trajectory.mental_state:
@@ -62,28 +59,23 @@ class PatientMindSimulator:
             changes_from_previous = (
                 trajectory.changes_from_previous if trajectory else {}
             )
-            previous_context = f"""
-=== PREVIOUS MENTAL STATE (Continuity Required) ===
-Previous Beliefs: {prev_state.beliefs}
-Previous Emotions: {prev_state.emotions}
-Previous Intentions: {prev_state.intentions}
-Previous Knowledge Gaps: {prev_state.knowledge_gaps}
-
-CHANGES FROM PREVIOUS:
-- Belief Changes: {changes_from_previous.get("beliefs", [])}
-- Emotion Changes: {changes_from_previous.get("emotions", [])}
-- Intention Changes: {changes_from_previous.get("intentions", [])}
-"""
+            previous_context = "\n=== PREVIOUS MENTAL STATE (Continuity Required) ===\n"
+            previous_context += "Previous Beliefs: " + str(prev_state.beliefs) + "\n"
+            previous_context += "Previous Emotions: " + str(prev_state.emotions) + "\n"
+            previous_context += "Previous Intentions: " + str(prev_state.intentions) + "\n"
+            previous_context += "Previous Knowledge Gaps: " + str(prev_state.knowledge_gaps) + "\n\n"
+            previous_context += "CHANGES FROM PREVIOUS:\n"
+            previous_context += "- Belief Changes: " + str(changes_from_previous.get("beliefs", [])) + "\n"
+            previous_context += "- Emotion Changes: " + str(changes_from_previous.get("emotions", [])) + "\n"
+            previous_context += "- Intention Changes: " + str(changes_from_previous.get("intentions", [])) + "\n"
 
         causal_context = ""
         if trajectory and trajectory.causal_event:
             causal = trajectory.causal_event
-            causal_context = f"""
-=== CAUSAL TRIGGER (What Just Happened) ===
-Trigger Event: {causal.trigger_event}
-What Changed: {causal.change_description}
-This caused: {causal.emotion_changes} emotions, {causal.belief_changes} beliefs
-"""
+            causal_context = "\n=== CAUSAL TRIGGER (What Just Happened) ===\n"
+            causal_context += "Trigger Event: " + str(causal.trigger_event) + "\n"
+            causal_context += "What Changed: " + str(causal.change_description) + "\n"
+            causal_context += "This caused: " + str(causal.emotion_changes) + " emotions, " + str(causal.belief_changes) + " beliefs\n"
 
         emotion_display_hints = self._get_emotion_display_hints(current_state.emotions)
         intention_action_hints = self._get_intention_action_hints(
@@ -93,76 +85,64 @@ This caused: {causal.emotion_changes} emotions, {causal.belief_changes} beliefs
             current_state.knowledge_gaps
         )
 
-        prompt = f"""You are simulating a REAL PATIENT's mind in a medical consultation.
-Your response MUST be COMPLETELY DRIVEN by the patient's current mental state.
-
-=== CRITICAL RULES ===
-1. Your response MUST reflect the patient's CURRENT EMOTIONS
-2. Your response MUST pursue the patient's CURRENT INTENTIONS
-3. Your response MUST reveal the patient's KNOWLEDGE GAPS naturally
-4. Your response MUST maintain continuity with previous mental state
-5. FORBIDDEN: Generic responses like "I see" or "Okay, I understand"
-6. FORBIDDEN: Responses that don't reflect the emotional state
-
-=== PATIENT'S CURRENT MENTAL STATE (DRIVING YOUR RESPONSE) ===
-BELIEFS (What patient believes):
-{json.dumps(current_state.beliefs, indent=2)}
-
-EMOTIONS (What patient is feeling NOW):
-{json.dumps(current_state.emotions, indent=2)}
-{emotion_display_hints}
-
-INTENTIONS (What patient wants to achieve):
-{json.dumps(current_state.intentions, indent=2)}
-{intention_action_hints}
-
-KNOWLEDGE GAPS (What patient doesn't understand):
-{json.dumps(current_state.knowledge_gaps, indent=2)}
-{gap_expression_hints}
-
-=== PATIENT'S POTENTIAL INTENTIONS (From ToM Analysis) ===
-{json.dumps(tom_reasoning.patient_potential_intentions, indent=2)}
-{temporal_evolution}
-{previous_context}
-{causal_context}
-=== PATIENT EHR DATA ===
-{context.get('input_text', '')}
-
-=== DIALOGUE HISTORY ===
-{format_dialogue_history(dialogue_history)}
-
-=== RESPONSE GENERATION INSTRUCTIONS ===
-Generate a response that:
-
-1. EMOTIONALLY RESONATES:
-   - If patient is anxious/worried: Show concern, ask clarifying questions
-   - If patient is confused: Express uncertainty, ask for explanation
-   - If patient is relieved: Show cautious optimism
-   - If patient is frustrated: Express impatience or concern
-
-2. PURSUES INTENTIONS:
-   - If intention is "understand diagnosis": Ask about what's wrong
-   - If intention is "get treatment": Ask about next steps
-   - If intention is "express concern": Share worries
-   - If intention is "seek reassurance": Ask if it's serious
-
-3. REVEALS KNOWLEDGE GAPS NATURALLY:
-   - Don't say "I have a knowledge gap about X"
-   - Instead ask: "What does that mean?" or "I'm not sure I understand..."
-   - Show confusion through questions, not statements
-
-4. MAINTAINS TEMPORAL CONTINUITY:
-   - Reference previous concerns if still unresolved
-   - Build on previous understanding
-   - Show emotional progression (not random jumps)
-
-=== FORBIDDEN RESPONSES ===
-DO NOT generate any of these generic responses:
-{json.dumps(FORBIDDEN_GENERIC_RESPONSES, indent=2)}
-
-OUTPUT: Just the patient's response (natural, conversational, emotion-reflecting, intention-driven)
-The response must be at least 15 characters and show clear mental state reflection.
-"""
+        # 构建对话历史字符串
+        dialogue_history_str = format_dialogue_history(dialogue_history)
+        
+        # 构建端到端的患者响应提示
+        prompt = "You are simulating a REAL PATIENT's mind in a medical consultation.\n"
+        prompt += "Your response MUST be COMPLETELY DRIVEN by the patient's current mental state.\n\n"
+        prompt += "=== CRITICAL RULES ===\n"
+        prompt += "1. Your response MUST reflect the patient's CURRENT EMOTIONS\n"
+        prompt += "2. Your response MUST pursue the patient's CURRENT INTENTIONS\n"
+        prompt += "3. Your response MUST reveal the patient's KNOWLEDGE GAPS naturally\n"
+        prompt += "4. Your response MUST maintain continuity with previous mental state\n"
+        prompt += "5. FORBIDDEN: Generic responses like \"I see\" or \"Okay, I understand\"\n"
+        prompt += "6. FORBIDDEN: Responses that don't reflect the emotional state\n\n"
+        prompt += "=== PATIENT'S CURRENT MENTAL STATE (DRIVING YOUR RESPONSE) ===\n"
+        prompt += "BELIEFS (What patient believes):\n"
+        prompt += json.dumps(current_state.beliefs, indent=2) + "\n\n"
+        prompt += "EMOTIONS (What patient is feeling NOW):\n"
+        prompt += json.dumps(current_state.emotions, indent=2) + "\n"
+        prompt += emotion_display_hints + "\n\n"
+        prompt += "INTENTIONS (What patient wants to achieve):\n"
+        prompt += json.dumps(current_state.intentions, indent=2) + "\n"
+        prompt += intention_action_hints + "\n\n"
+        prompt += "KNOWLEDGE GAPS (What patient doesn't understand):\n"
+        prompt += json.dumps(current_state.knowledge_gaps, indent=2) + "\n"
+        prompt += gap_expression_hints + "\n\n"
+        prompt += "=== PATIENT'S POTENTIAL INTENTIONS (From ToM Analysis) ===\n"
+        prompt += json.dumps(tom_reasoning.patient_potential_intentions, indent=2) + "\n"
+        prompt += temporal_evolution + ""
+        prompt += previous_context + ""
+        prompt += causal_context + "=== PATIENT EHR DATA ===\n"
+        prompt += context.get('input_text', '') + "\n\n"
+        prompt += "=== DIALOGUE HISTORY ===\n"
+        prompt += dialogue_history_str + "\n\n"
+        prompt += "=== RESPONSE GENERATION INSTRUCTIONS ===\n"
+        prompt += "Generate a response that:\n\n"
+        prompt += "1. EMOTIONALLY RESONATES:\n"
+        prompt += "   - If patient is anxious/worried: Show concern, ask clarifying questions\n"
+        prompt += "   - If patient is confused: Express uncertainty, ask for explanation\n"
+        prompt += "   - If patient is relieved: Show cautious optimism\n"
+        prompt += "   - If patient is frustrated: Express impatience or concern\n\n"
+        prompt += "2. PURSUES INTENTIONS:\n"
+        prompt += "   - If intention is \"understand diagnosis\": Ask about what's wrong\n"
+        prompt += "   - If intention is \"get treatment\": Ask about next steps\n"
+        prompt += "   - If intention is \"express concern\": Share worries\n"
+        prompt += "   - If intention is \"seek reassurance\": Ask if it's serious\n\n"
+        prompt += "3. REVEALS KNOWLEDGE GAPS NATURALLY:\n"
+        prompt += "   - Don't say \"I have a knowledge gap about X\"\n"
+        prompt += "   - Instead ask: \"What does that mean?\" or \"I'm not sure I understand...\"\n"
+        prompt += "   - Show confusion through questions, not statements\n\n"
+        prompt += "4. MAINTAINS TEMPORAL CONTINUITY:\n"
+        prompt += "   - Reference previous concerns if still unresolved\n"
+        prompt += "   - Build on previous understanding\n"
+        prompt += "   - Show emotional progression (not random jumps)\n\n"
+        prompt += "=== FORBIDDEN RESPONSES ===\n"
+        prompt += "DO NOT generate any of these generic responses:\n"
+        prompt += json.dumps(FORBIDDEN_GENERIC_RESPONSES, indent=2) + "\n\n"
+        prompt += "OUTPUT: Just the patient's response (natural, conversational, emotion-reflecting, intention-driven)\n"
+        prompt += "The response must be at least 15 characters and show clear mental state reflection.\n"
         return prompt
 
     def _get_emotion_display_hints(self, emotions: List[str]) -> str:
