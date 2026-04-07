@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 医疗干预智能体数据集生成脚本 - 主入口
-严格落地两篇ToM论文核心方案
 """
 
 import argparse
@@ -16,6 +15,15 @@ logger = get_logger()
 
 
 def main():
+    """
+    主函数 - 医疗干预智能体数据集生成入口
+    
+    功能：
+    - 解析命令行参数
+    - 初始化数据集生成器
+    - 处理EHR文件生成ToM数据集
+    - 处理异常情况
+    """
     parser = argparse.ArgumentParser(
         description='Generate ToM-based medical intervention agent dataset',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -29,8 +37,7 @@ Examples:
 
   # Use vLLM for high-performance inference
   python main.py --provider vllm --local_model_path ~/models/alfworld-model
-        """
-    )
+        """)
     
     # LLM Provider arguments
     parser.add_argument('--provider', type=str, default='openai',

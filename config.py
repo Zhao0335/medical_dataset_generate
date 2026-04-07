@@ -14,6 +14,15 @@ ProviderType = Literal["openai", "local", "vllm"]
 
 @dataclass
 class ToMThresholds:
+    """
+    ToM 阈值配置类
+    
+    属性：
+    - doctor_info_completeness_threshold: 医生信息完整性阈值 (0.80)
+    - patient_gap_coverage_threshold: 患者知识缺口覆盖阈值 (0.70)
+    - max_safety_turns: 最大安全轮次 (15)
+    - max_dialogue_turns: 最大对话轮次 (12)
+    """
     doctor_info_completeness_threshold: float = 0.80
     patient_gap_coverage_threshold: float = 0.70
     max_safety_turns: int = 15
@@ -22,6 +31,25 @@ class ToMThresholds:
 
 @dataclass
 class LLMConfig:
+    """
+    LLM 配置类
+    
+    属性：
+    - provider: LLM 提供者类型 (openai/local/vllm)
+    - model: 模型名称
+    - max_tokens: 最大生成 tokens
+    - temperature: 生成温度
+    - delay: API 调用延迟
+    - max_retries: 最大重试次数
+    - api_key: API 密钥
+    - base_url: API 基础 URL
+    - local_model_path: 本地模型路径
+    - device: 设备选择 (auto/cpu/cuda)
+    - load_in_8bit: 是否 8-bit 量化
+    - load_in_4bit: 是否 4-bit 量化
+    - tensor_parallel_size: 张量并行大小 (vLLM)
+    - gpu_memory_utilization: GPU 内存利用率 (vLLM)
+    """
     provider: ProviderType = "openai"
     model: str = "gpt-4"
     max_tokens: int = 2500
@@ -38,31 +66,40 @@ class LLMConfig:
     gpu_memory_utilization: float = 0.9
 
 
-@dataclass
-class APIConfig:
-    api_key: str = ""
-    base_url: str = ""
-    model: str = "gpt-4"
-    max_tokens: int = 2500
-    temperature: float = 0.3
-    delay: float = 2.0
-    max_retries: int = 3
+# APIConfig 已合并到 LLMConfig 中，不再需要单独的 APIConfig 类
 
 
 @dataclass
 class TaskConfig:
+    """
+    任务配置类
+    
+    属性：
+    - system_prompt: 系统提示
+    - required_info: 所需信息列表
+    """
     system_prompt: str
     required_info: List[str]
 
 
 @dataclass
 class Config:
+    """
+    主配置类
+    
+    属性：
+    - tom_thresholds: ToM 阈值配置
+    - llm: LLM 配置
+    - task_configs: 任务配置字典
+    """
     tom_thresholds: ToMThresholds = field(default_factory=ToMThresholds)
-    api: APIConfig = field(default_factory=APIConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     task_configs: Dict[str, TaskConfig] = field(default_factory=dict)
     
     def __post_init__(self):
+        """
+        初始化后处理 - 设置默认任务配置
+        """
         self.task_configs = {
             "diagnosis": TaskConfig(
                 system_prompt="You are an experienced doctor using Theory of Mind for diagnosis.",
@@ -80,13 +117,17 @@ class Config:
     
     @classmethod
     def from_env(cls) -> 'Config':
+        """
+        从环境变量创建配置
+        
+        返回：
+        - Config 实例
+        """
         config = cls()
         config.llm.api_key = os.environ.get("OPENAI_API_KEY", "")
         config.llm.base_url = os.environ.get("OPENAI_BASE_URL", "")
         config.llm.local_model_path = os.environ.get("LOCAL_MODEL_PATH", "")
         config.llm.provider = os.environ.get("LLM_PROVIDER", "openai")
-        config.api.api_key = config.llm.api_key
-        config.api.base_url = config.llm.base_url
         return config
     
     @classmethod
@@ -99,6 +140,20 @@ class Config:
         local_model_path: str = None,
         device: str = "auto"
     ) -> 'Config':
+        """
+        从参数创建配置
+        
+        参数：
+        - provider: LLM 提供者类型
+        - api_key: API 密钥
+        - base_url: API 基础 URL
+        - model: 模型名称
+        - local_model_path: 本地模型路径
+        - device: 设备选择
+        
+        返回：
+        - Config 实例
+        """
         config = cls()
         config.llm.provider = provider
         config.llm.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -106,12 +161,18 @@ class Config:
         config.llm.model = model
         config.llm.local_model_path = local_model_path or os.environ.get("LOCAL_MODEL_PATH", "")
         config.llm.device = device
-        config.api.api_key = config.llm.api_key
-        config.api.base_url = config.llm.base_url
-        config.api.model = model
         return config
     
     def create_llm_provider(self):
+        """
+        创建 LLM 提供者实例
+        
+        返回：
+        - BaseLLMProvider 实例
+        
+        异常：
+        - ValueError: 未知的提供者类型
+        """
         from llm_provider import create_llm_provider
         
         if self.llm.provider == "openai":

@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ToM推理模块 - 严格落地论文1+2核心方案
-论文1：双步骤ToM - Step1自主决策、Step2心理推理、自适应DoM
-论文2：动态时序ToM - 时序链式推理、因果触发链、中间丢失解决
+双步骤ToM - Step1自主决策、Step2心理推理、自适应DoM
+动态时序ToM - 时序链式推理、因果触发链、中间丢失解决
 """
 
 import json
@@ -37,8 +37,21 @@ logger = get_logger()
 
 
 class ToMReasoningModule:
+    """
+    ToM 推理模块
     
+    功能：
+    - 实现双步骤 ToM 推理
+    - 动态时序心智轨迹追踪
+    - 错误检测和修正
+    """
     def __init__(self, llm_provider: BaseLLMProvider):
+        """
+        初始化 ToM 推理模块
+        
+        参数：
+        - llm_provider: LLM 提供者实例
+        """
         self.llm_provider = llm_provider
         self.error_detector = ToMErrorDetector()
         self.trajectory_history: List[TemporalMentalTrajectory] = []
@@ -49,6 +62,17 @@ class ToMReasoningModule:
         dialogue_history: List[DialogueTurn],
         task_type: str
     ) -> int:
+        """
+        确定自适应 DoM 水平
+        
+        参数：
+        - context: 上下文信息
+        - dialogue_history: 对话历史
+        - task_type: 任务类型
+        
+        返回：
+        - int: DoM 水平 (0=零阶, 1=一阶)
+        """
         if len(dialogue_history) <= 1:
             return DoMLevel.ZERO_ORDER.value
         
@@ -82,6 +106,17 @@ class ToMReasoningModule:
         dialogue_history: List[DialogueTurn],
         task_type: str
     ) -> Tuple[bool, int, str]:
+        """
+        Step1 ToM 调用决策
+        
+        参数：
+        - context: 上下文信息
+        - dialogue_history: 对话历史
+        - task_type: 任务类型
+        
+        返回：
+        - Tuple[bool, int, str]: (是否调用ToM, DoM水平, 决策理由)
+        """
         if len(dialogue_history) == 0:
             return True, 0, "Initial consultation: ToM required to establish patient baseline mental state"
         
@@ -118,6 +153,18 @@ class ToMReasoningModule:
         context: Dict[str, Any],
         dom_level: int
     ) -> str:
+        """
+        构建时序链提示
+        
+        参数：
+        - dialogue_history: 对话历史
+        - previous_trajectory: 之前的心智轨迹
+        - context: 上下文信息
+        - dom_level: DoM 水平
+        
+        返回：
+        - str: 时序链提示
+        """
         anchored_history = ""
         if previous_trajectory and previous_trajectory.anchored_history:
             anchored_history = f"""
@@ -262,7 +309,22 @@ OUTPUT FORMAT (JSON):
         task_type: str,
         previous_trajectory: Optional[TemporalMentalTrajectory]
     ) -> ToMReasoning:
+        """
+        Step2 心理状态推理
         
+        参数：
+        - context: 上下文信息
+        - dialogue_history: 对话历史
+        - dom_level: DoM 水平
+        - task_type: 任务类型
+        - previous_trajectory: 之前的心智轨迹
+        
+        返回：
+        - ToMReasoning: ToM 推理结果
+        
+        异常：
+        - APIError: API 错误
+        """
         prompt = self._build_temporal_chain_prompt(
             dialogue_history, previous_trajectory, context, dom_level
         )

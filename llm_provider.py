@@ -3,7 +3,7 @@
 """
 LLM 提供者模块 - 支持多种 LLM 后端
 - OpenAI API (默认)
-- 本地模型 (HuggingFace Transformers) - 需要安装 torch
+- 本地模型 (HuggingFace Transformers) - 需要安装 torch/transformers
 - vLLM (高性能推理) - 需要安装 vllm
 """
 
