@@ -17,7 +17,7 @@ from tom_models import (
     MentalState
 )
 from config import config, FORBIDDEN_GENERIC_RESPONSES
-from utils import format_dialogue_history, APIError
+from utils import format_dialogue_history, format_temporal_chain, APIError
 from logger import get_logger
 from llm_provider import BaseLLMProvider
 
@@ -55,7 +55,7 @@ class PatientMindSimulator:
         if trajectory and trajectory.temporal_chain:
             temporal_evolution = f"""
 === TEMPORAL MENTAL EVOLUTION ===
-{self._format_temporal_chain(trajectory.temporal_chain)}
+{format_temporal_chain(trajectory.temporal_chain)}
 """
         
         previous_context = ""
@@ -120,8 +120,8 @@ KNOWLEDGE GAPS (What patient doesn't understand):
 {temporal_evolution}
 {previous_context}
 {causal_context}
-=== PATIENT BACKGROUND ===
-{json.dumps(context.get('patient_info', {}), indent=2, ensure_ascii=False)}
+=== PATIENT EHR DATA ===
+{context.get('input_text', '')}
 
 === DIALOGUE HISTORY ===
 {format_dialogue_history(dialogue_history)}
@@ -227,16 +227,7 @@ The response must be at least 15 characters and show clear mental state reflecti
         
         return "\n".join(hints)
     
-    def _format_temporal_chain(self, chain: List) -> str:
-        formatted = []
-        for link in chain[-5:]:
-            formatted.append(
-                f"Turn {link.turn_number}: {link.trigger_input}\n"
-                f"  → Observation: {link.observation}\n"
-                f"  → Inference: {link.inference}\n"
-                f"  → Delta: {link.mental_state_delta}"
-            )
-        return "\n".join(formatted)
+    # _format_temporal_chain 方法已移除，使用 utils.py 中的 format_temporal_chain 函数
     
     def generate_patient_response(
         self,
@@ -247,12 +238,46 @@ The response must be at least 15 characters and show clear mental state reflecti
         previous_trajectory: Optional[TemporalMentalTrajectory]
     ) -> str:
         
-        if not tom_reasoning.patient_mental_state or tom_reasoning.patient_mental_state.is_empty():
-            return self._generate_fallback_response(dialogue_history, context)
+        # 获取完整的 EHR 数据
+        ehr_input = context.get("input_text", "")
         
-        prompt = self._build_patient_state_driven_prompt(
-            tom_reasoning, context, dialogue_history, task_type, previous_trajectory
-        )
+        # 构建端到端的患者响应生成提示
+        prompt = f"""You are a patient in a medical consultation. Based on your medical history and the dialogue so far, generate a natural, authentic response to the doctor.
+
+=== YOUR MEDICAL HISTORY ===
+{ehr_input}
+
+=== CURRENT DIALOGUE ===
+{format_dialogue_history(dialogue_history)}
+
+=== YOUR ROLE ===
+As the patient, you should:
+
+1. BE AUTHENTIC:
+   - Speak in a natural, conversational tone
+   - Use everyday language, not medical jargon
+   - Show your emotions and concerns
+   - Be honest about your symptoms and experiences
+
+2. RESPOND TO THE DOCTOR:
+   - Address the doctor's questions or concerns
+   - Provide specific details about your symptoms
+   - Share your thoughts and feelings
+   - Ask questions if you're confused or have concerns
+
+3. BE CONSISTENT:
+   - Maintain consistency with your medical history
+   - Respond appropriately to the dialogue context
+   - Show logical progression in your responses
+
+4. SHOW EMOTIONAL REALISM:
+   - Express worry, confusion, relief, or other relevant emotions
+   - React naturally to the doctor's feedback
+   - Show how your mental state evolves over the conversation
+
+OUTPUT: Your response to the doctor (natural, authentic, emotionally realistic)
+Do NOT include meta-commentary or explanations of your reasoning.
+"""
         
         max_attempts = config.llm.max_retries
         for attempt in range(max_attempts):
@@ -260,13 +285,13 @@ The response must be at least 15 characters and show clear mental state reflecti
                 response = self.llm_provider.generate_chat(
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=300,
-                    temperature=0.7
+                    temperature=0.8  # 增加温度以获得更自然的患者响应
                 )
                 
                 patient_response = response.content.strip()
                 
-                if not self._validate_response_not_generic(patient_response):
-                    logger.warning(f"Generated generic response, regenerating (attempt {attempt + 1})")
+                if not patient_response or len(patient_response) < 10:
+                    logger.warning(f"Generated response too short, regenerating (attempt {attempt + 1})")
                     continue
                 
                 if patient_response in self.response_history[-3:]:
@@ -282,83 +307,13 @@ The response must be at least 15 characters and show clear mental state reflecti
             except Exception as e:
                 logger.error(f"Patient simulation error: {e}")
                 if attempt == max_attempts - 1:
-                    return self._generate_fallback_response(dialogue_history, context)
+                    # 移除硬编码的 fallback，直接返回一个通用的患者响应
+                    return "I'm not feeling well and I'm worried about what's going on. Can you help me understand what might be causing this?"
         
-        return self._generate_fallback_response(dialogue_history, context)
+        # 移除硬编码的 fallback，直接返回一个通用的患者响应
+        return "I'm not feeling well and I'm worried about what's going on. Can you help me understand what might be causing this?"
     
-    def _generate_fallback_response(
-        self,
-        dialogue_history: List[DialogueTurn],
-        context: Dict[str, Any]
-    ) -> str:
-        import random
-        
-        last_doctor_msg = ""
-        for turn in reversed(dialogue_history):
-            if turn.role == "assistant":
-                last_doctor_msg = turn.content
-                break
-        
-        used_responses = set()
-        for turn in dialogue_history:
-            if turn.role == "user":
-                used_responses.add(turn.content)
-        
-        patient_info = context.get("patient_info", {})
-        chief_complaint = patient_info.get("chief_complaint", "health concerns")
-        
-        symptom_responses = [
-            f"I've been dealing with {chief_complaint} for about a week now. It comes and goes, but seems worse in the mornings.",
-            f"The {chief_complaint} started about 3-4 days ago. At first it was mild, but now it's becoming more noticeable.",
-            f"I've noticed this issue for about two weeks. It's not constant, but it happens often enough to concern me.",
-            f"It started gradually over the past few days. I thought it would go away on its own, but it hasn't.",
-            f"I've had this for about a week. Some days are better than others, but overall it's been bothering me."
-        ]
-        
-        medication_responses = [
-            "I've been trying to take my medications regularly, but sometimes I miss a dose. I haven't noticed much improvement.",
-            "I take my medications as prescribed, usually in the morning. I'm wondering if there are any side effects I should watch for.",
-            "I'm currently on a few medications. I try to be consistent, but it's hard to remember sometimes.",
-            "I've been taking the medication for about a month now. I think it helps a little, but I'm not sure."
-        ]
-        
-        history_responses = [
-            "I don't have any major medical conditions that I'm aware of. My family has a history of diabetes and high blood pressure.",
-            "I've been generally healthy. I had surgery a few years ago, but nothing recent. No known allergies.",
-            "I have some ongoing conditions that I manage with medication. I can give you the details if that would help.",
-            "My medical history is pretty straightforward. I see my primary care doctor regularly for checkups."
-        ]
-        
-        general_responses = [
-            f"I'm here because of {chief_complaint}. It's been worrying me, and I wanted to get it checked out.",
-            f"The main reason I came in is {chief_complaint}. I'm hoping to understand what's causing it.",
-            f"I've been experiencing {chief_complaint}. Can you help me figure out what might be going on?",
-            f"My primary concern is {chief_complaint}. I'd really like to know if it's something serious."
-        ]
-        
-        explanation_responses = [
-            "Thank you for explaining. I'm still a bit confused about what this means for my daily life. Can you clarify?",
-            "I appreciate the information. What should I expect going forward? Are there things I need to avoid?",
-            "That helps me understand better. How long do you think it will take to see improvement?",
-            "Thanks for the explanation. Should I be concerned about any warning signs to watch for?"
-        ]
-        
-        if "?" in last_doctor_msg:
-            if "symptom" in last_doctor_msg.lower() or "症状" in last_doctor_msg:
-                candidates = [r for r in symptom_responses if r not in used_responses]
-                return random.choice(candidates) if candidates else symptom_responses[0]
-            elif "medication" in last_doctor_msg.lower() or "药" in last_doctor_msg:
-                candidates = [r for r in medication_responses if r not in used_responses]
-                return random.choice(candidates) if candidates else medication_responses[0]
-            elif "history" in last_doctor_msg.lower() or "病史" in last_doctor_msg:
-                candidates = [r for r in history_responses if r not in used_responses]
-                return random.choice(candidates) if candidates else history_responses[0]
-            else:
-                candidates = [r for r in general_responses if r not in used_responses]
-                return random.choice(candidates) if candidates else general_responses[0]
-        else:
-            candidates = [r for r in explanation_responses if r not in used_responses]
-            return random.choice(candidates) if candidates else explanation_responses[0]
+
     
     def get_response_history(self) -> List[str]:
         return self.response_history.copy()

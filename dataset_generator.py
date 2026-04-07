@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-医疗数据集生成器主类 - 严格落地论文1+2核心方案
+医疗数据集生成器主类
 整合所有ToM模块，生成完整的对话数据集
 """
 
@@ -12,8 +12,6 @@ import time
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import asdict
 from contextlib import contextmanager
-
-from openai import OpenAI
 
 from tom_models import (
     ToMReasoning,
@@ -83,63 +81,6 @@ class MedicalDatasetGenerator:
         self.patient_simulator = PatientMindSimulator(self.llm_provider)
         self.goal_checker = ToMGoalChecker()
     
-    def extract_patient_info(self, ehr_data: Dict) -> Dict[str, Any]:
-        patient_info = {
-            "demographics": {},
-            "chief_complaint": "",
-            "vital_signs": {},
-            "lab_results": [],
-            "medications": [],
-            "medical_history": "",
-            "allergies": []
-        }
-        
-        input_text = ehr_data.get("input", "")
-        
-        demographics_match = re.search(r'## Patient Demographics \[None\](.*?)(?=##|\Z)', input_text, re.DOTALL)
-        if demographics_match:
-            demo_text = demographics_match.group(1)
-            age_match = re.search(r'Anchor_Age:\s*(\d+)', demo_text)
-            gender_match = re.search(r'Gender:\s*(\w+)', demo_text)
-            if age_match:
-                patient_info["demographics"]["age"] = int(age_match.group(1))
-            if gender_match:
-                patient_info["demographics"]["gender"] = gender_match.group(1)
-        
-        triage_match = re.search(r'## Triage \[.*?\](.*?)(?=##|\Z)', input_text, re.DOTALL)
-        if triage_match:
-            triage_text = triage_match.group(1)
-            chief_match = re.search(r'Chiefcomplaint:\s*(.+?)(?:\n|$)', triage_text)
-            if chief_match:
-                patient_info["chief_complaint"] = chief_match.group(1).strip()
-            
-            vs_fields = ['Temperature', 'Heartrate', 'Resprate', 'O2Sat', 'Sbp', 'Dbp', 'Pain']
-            for field in vs_fields:
-                match = re.search(rf'{field}:\s*([\d.]+|nan)', triage_text)
-                if match and match.group(1) != 'nan':
-                    patient_info["vital_signs"][field.lower()] = float(match.group(1))
-        
-        discharge_match = re.search(r'## Discharge \[.*?\](.*?)(?=##|\Z)', input_text, re.DOTALL)
-        if discharge_match:
-            discharge_text = discharge_match.group(1)
-            
-            allergies_match = re.search(r'Allergies:\s*\n(.+?)(?=\n\n|\nAttending:)', discharge_text, re.DOTALL)
-            if allergies_match:
-                allergies_text = allergies_match.group(1).strip()
-                patient_info["allergies"] = [a.strip() for a in allergies_text.split('/') if a.strip()]
-            
-            pmh_match = re.search(r'Past Medical History:\s*(.+?)(?=\n\n|\nSocial History:)', discharge_text, re.DOTALL)
-            if pmh_match:
-                patient_info["medical_history"] = pmh_match.group(1).strip()[:500]
-        
-        medrecon_match = re.search(r'## Medrecon \[.*?\](.*?)(?=##|\Z)', input_text, re.DOTALL)
-        if medrecon_match:
-            medrecon_text = medrecon_match.group(1)
-            med_matches = re.findall(r'\|\s*([A-Za-z0-9\s\-\[\]]+?)\s*\|', medrecon_text)
-            patient_info["medications"] = [m.strip() for m in med_matches 
-                                           if m.strip() and m.strip() not in ['Name', 'Atc Type']][:10]
-        
-        return patient_info
     
     def generate_doctor_response_with_tom(
         self,
@@ -153,78 +94,46 @@ class MedicalDatasetGenerator:
         if not task_config:
             raise ValidationError(f"Unknown task type: {task_type}")
         
-        if not tom_reasoning.has_valid_data():
-            logger.warning("ToM reasoning has no valid data, generating fallback response")
-            return self._generate_fallback_doctor_response(dialogue_history, task_type)
+        # 获取完整的 EHR 数据
+        ehr_input = context.get("input_text", "")
         
-        error_corrections_summary = ""
-        if tom_reasoning.tom_errors_detected:
-            error_corrections_summary = f"""
-ToM ERROR CORRECTIONS APPLIED:
-{chr(10).join([f"- {e.error_type.value}: {e.correction_applied}" for e in tom_reasoning.tom_errors_detected])}
-"""
-        
-        temporal_chain_summary = ""
-        if tom_reasoning.temporal_chain_reasoning:
-            temporal_chain_summary = f"""
-TEMPORAL CHAIN REASONING:
-{format_temporal_chain(tom_reasoning.temporal_chain_reasoning)}
-"""
-        
+        # 构建端到端的 ToM 驱动对话生成提示
         prompt = f"""{task_config.system_prompt}
 
-=== ToM REASONING RESULTS (MUST DRIVE YOUR RESPONSE) ===
-Step1 Decision: {"ToM invoked" if tom_reasoning.should_invoke_tom else "ToM not needed"}
-DoM Level: {tom_reasoning.dom_level}
-Reason: {tom_reasoning.step1_decision_reason}
+You are a medical professional using Theory of Mind (ToM) to provide empathetic, patient-centered care.
 
-=== MENTAL BOUNDARY SEPARATION (Strict Isolation) ===
-DOCTOR's Known Info: {tom_reasoning.mental_boundary.doctor_known}
-DOCTOR's Unknown Info: {tom_reasoning.mental_boundary.doctor_unknown}
-PATIENT's Known Info: {tom_reasoning.mental_boundary.patient_known}
-PATIENT's Knowledge Gaps: {tom_reasoning.mental_boundary.patient_knowledge_gaps}
+=== PATIENT EHR DATA ===
+{ehr_input}
 
-=== PATIENT's MENTAL STATE ===
-Beliefs: {tom_reasoning.patient_mental_state.beliefs}
-Emotions: {tom_reasoning.patient_mental_state.emotions}
-Intentions: {tom_reasoning.patient_mental_state.intentions}
-Knowledge Gaps: {tom_reasoning.patient_mental_state.knowledge_gaps}
-
-=== TEMPORAL TRAJECTORY ===
-Current Turn: {tom_reasoning.temporal_trajectory.turn_number if tom_reasoning.temporal_trajectory else 'N/A'}
-Changes: {tom_reasoning.temporal_trajectory.changes_from_previous if tom_reasoning.temporal_trajectory else {}}
-Causal Trigger: {tom_reasoning.temporal_trajectory.causal_event.trigger_event if tom_reasoning.temporal_trajectory and tom_reasoning.temporal_trajectory.causal_event else 'N/A'}
-{temporal_chain_summary}
-{error_corrections_summary}
-=== NEXT ACTION STRATEGY ===
-{tom_reasoning.next_action_strategy}
-
-=== DIALOGUE HISTORY ===
+=== CURRENT DIALOGUE ===
 {format_dialogue_history(dialogue_history)}
 
-=== CRITICAL INSTRUCTIONS ===
-Your response MUST be DIRECTLY DRIVEN by the ToM analysis above:
+=== YOUR ROLE ===
+Based on the patient's EHR data and the dialogue history, you must:
 
-1. ADDRESS PATIENT's KNOWLEDGE GAPS:
-   - If patient has knowledge gaps, explain clearly
-   - Use simple language, avoid jargon
-   - Check for understanding
+1. ANALYZE PATIENT's MENTAL STATE:
+   - Beliefs: What does the patient believe about their condition?
+   - Emotions: What is the patient feeling right now?
+   - Intentions: What does the patient want to achieve?
+   - Knowledge Gaps: What does the patient not understand?
 
-2. RESPOND TO PATIENT's EMOTIONS:
-   - Acknowledge emotions: {tom_reasoning.patient_mental_state.emotions}
-   - Show empathy appropriately
-   - Provide reassurance if worried/anxious
+2. PERFORM TEMPORAL CHAIN REASONING:
+   - Track how the patient's mental state has evolved
+   - Identify causal events that changed their mental state
+   - Understand the temporal progression of their concerns
 
-3. PURSUE PATIENT's INTENTIONS:
-   - Help patient achieve: {tom_reasoning.patient_mental_state.intentions}
-   - Address their goals
+3. GENERATE TO M-DRIVEN RESPONSE:
+   - Address the patient's knowledge gaps with clear explanations
+   - Respond to their emotions with empathy
+   - Help them achieve their intentions
+   - Gather any missing information needed for diagnosis/treatment
+   - Make medically appropriate recommendations based on EHR data
 
-4. GATHER MISSING INFO:
-   - Still need to know: {tom_reasoning.mental_boundary.doctor_unknown}
-   - Ask targeted questions
-
-5. FOLLOW NEXT ACTION STRATEGY:
-   - {tom_reasoning.next_action_strategy}
+4. MAINTAIN NATURAL DIALOGUE:
+   - Speak in a natural, conversational tone
+   - Avoid jargon and technical language
+   - Show genuine concern and understanding
+   - Adapt your response to the patient's emotional state
 
 OUTPUT: Your response to the patient (natural, empathetic, ToM-driven)
 Do NOT include meta-commentary or explanations of your reasoning.
@@ -234,121 +143,21 @@ Do NOT include meta-commentary or explanations of your reasoning.
             response = self.llm_provider.generate_chat(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=500,
-                temperature=0.5
+                temperature=0.7  # 增加温度以获得更自然的响应
             )
             return response.content.strip()
         except Exception as e:
             logger.error(f"Doctor response generation error: {e}")
-            return self._generate_fallback_doctor_response(dialogue_history, task_type)
+            # 移除硬编码的 fallback，直接返回一个通用的询问
+            return "I'm sorry, I need to understand more about your situation. Could you tell me more about what you're experiencing?"
     
-    def _generate_fallback_doctor_response(
-        self,
-        dialogue_history: List[DialogueTurn],
-        task_type: str
-    ) -> str:
-        import random
-        
-        last_patient_msg = ""
-        for turn in reversed(dialogue_history):
-            if turn.role == "user":
-                last_patient_msg = turn.content
-                break
-        
-        used_responses = set()
-        for turn in dialogue_history:
-            if turn.role == "assistant":
-                used_responses.add(turn.content)
-        
-        if task_type == TaskType.DIAGNOSIS.value:
-            if not last_patient_msg:
-                return "Hello, I understand you're here for a consultation. Can you tell me what brings you in today?"
-            
-            diagnosis_questions = [
-                "Thank you for sharing that. Can you tell me more about when these symptoms started and how severe they are?",
-                "I appreciate that information. How long have you been experiencing this? Is it constant or does it come and go?",
-                "That's helpful to know. On a scale of 1 to 10, how would you rate the severity? What makes it better or worse?",
-                "I see. Have you noticed any patterns with your symptoms? Are there specific times of day when it's worse?",
-                "Thank you for describing that. Have you experienced any other symptoms along with this, like fever or fatigue?",
-                "I understand. Have you tried anything to relieve the symptoms? Did it help?",
-                "That's important information. Do you have any existing medical conditions or take any medications regularly?"
-            ]
-            
-            candidates = [q for q in diagnosis_questions if q not in used_responses]
-            return random.choice(candidates) if candidates else diagnosis_questions[0]
-            
-        elif task_type == TaskType.MEDRECON.value:
-            medrecon_questions = [
-                "Let's review your current medications. Can you tell me what medications you're currently taking and how you're taking them?",
-                "I'd like to go over your medication list. What prescriptions are you on, and are you taking them as directed?",
-                "Can you walk me through your daily medication routine? Are there any you've missed or had trouble with?",
-                "I want to make sure we have your complete medication list. What do you take regularly, including over-the-counter medications?"
-            ]
-            
-            candidates = [q for q in medrecon_questions if q not in used_responses]
-            return random.choice(candidates) if candidates else medrecon_questions[0]
-            
-        else:
-            prescription_responses = [
-                "Based on what we've discussed, let me explain the treatment options available to you.",
-                "Given your condition, I'd like to recommend a treatment plan. Let me explain the options.",
-                "I think we have a good understanding of your situation now. Here's what I recommend for treatment.",
-                "Based on our discussion, I'd like to prescribe some medication. Let me explain what it does and how to take it."
-            ]
-            
-            candidates = [r for r in prescription_responses if r not in used_responses]
-            return random.choice(candidates) if candidates else prescription_responses[0]
+
     
-    def _check_dialogue_repetition(
-        self,
-        dialogue: List[DialogueTurn],
-        new_content: str,
-        role: str
-    ) -> bool:
-        if len(dialogue) < 2:
-            return False
-        
-        same_role_contents = [
-            turn.content for turn in dialogue 
-            if turn.role == role
-        ]
-        
-        if new_content in same_role_contents:
-            return True
-        
-        if len(same_role_contents) >= 2:
-            last_two = same_role_contents[-2:]
-            if len(set(last_two)) == 1 and new_content == last_two[0]:
-                return True
-        
-        return False
-    
-    def _should_terminate_early(
-        self,
-        dialogue: List[DialogueTurn]
-    ) -> bool:
-        if len(dialogue) < 4:
-            return False
-        
-        doctor_msgs = [t.content for t in dialogue if t.role == "assistant"]
-        patient_msgs = [t.content for t in dialogue if t.role == "user"]
-        
-        if len(doctor_msgs) >= 3:
-            last_3_doctor = doctor_msgs[-3:]
-            if len(set(last_3_doctor)) == 1:
-                logger.warning("Detected repeated doctor responses, terminating early")
-                return True
-        
-        if len(patient_msgs) >= 3:
-            last_3_patient = patient_msgs[-3:]
-            if len(set(last_3_patient)) == 1:
-                logger.warning("Detected repeated patient responses, terminating early")
-                return True
-        
-        return False
+
     
     def generate_dialogue_with_tom(
         self,
-        patient_info: Dict[str, Any],
+        ehr_data: Dict[str, Any],
         task_type: str,
         max_turns: int = None
     ) -> Tuple[List[DialogueTurn], List[ToMReasoning]]:
@@ -359,14 +168,36 @@ Do NOT include meta-commentary or explanations of your reasoning.
         dialogue = []
         tom_reasonings = []
         
+        # 直接使用完整的 EHR 数据作为上下文
         context = {
-            "patient_info": patient_info,
-            "chief_complaint": patient_info.get("chief_complaint", "Unknown")
+            "ehr_data": ehr_data,
+            "input_text": ehr_data.get("input", "")
         }
         
         previous_trajectory = None
         
-        initial_doctor_msg = f"Hello, I understand you're here because of {patient_info.get('chief_complaint', 'some health concerns')}. Can you tell me more about what's been going on?"
+        # 使用 LLM 生成初始医生开场
+        ehr_input = ehr_data.get("input", "")
+        initial_prompt = f"""You are a doctor starting a consultation with a patient. Based on the patient's EHR data, generate a natural, empathetic opening question.
+
+=== PATIENT EHR DATA ===
+{ehr_input}
+
+OUTPUT: Your opening question to the patient (natural, empathetic, focused on the chief complaint)
+"""
+        
+        try:
+            response = self.llm_provider.generate_chat(
+                messages=[{"role": "user", "content": initial_prompt}],
+                max_tokens=200,
+                temperature=0.7
+            )
+            initial_doctor_msg = response.content.strip()
+        except Exception as e:
+            logger.error(f"Initial doctor message generation error: {e}")
+            # 简单的 fallback
+            initial_doctor_msg = "Hello, I'm here to help you. Can you tell me what brings you in today?"
+        
         dialogue.append(DialogueTurn(
             content=initial_doctor_msg,
             role="assistant",
@@ -411,16 +242,10 @@ Do NOT include meta-commentary or explanations of your reasoning.
         required_info = task_config.required_info if task_config else []
         
         for turn_num in range(1, max_turns):
-            if self._should_terminate_early(dialogue):
-                logger.warning(f"Early termination at turn {turn_num} due to repetition")
-                break
-            
+            # 生成患者响应
             patient_response = self.patient_simulator.generate_patient_response(
                 tom_reasoning, context, dialogue, task_type, previous_trajectory
             )
-            
-            if self._check_dialogue_repetition(dialogue, patient_response, "user"):
-                logger.warning(f"Patient response repetition detected at turn {turn_num}")
             
             dialogue.append(DialogueTurn(
                 content=patient_response,
@@ -428,10 +253,12 @@ Do NOT include meta-commentary or explanations of your reasoning.
                 turn_number=turn_num * 2 - 1
             ))
             
+            # Step1: ToM 调用决策
             should_invoke, dom_level, decision_reason = self.tom_module.step1_tom_invocation_decision(
                 context, dialogue, task_type
             )
             
+            # Step2: 心理状态推理
             if should_invoke:
                 tom_reasoning = self.tom_module.step2_mental_state_inference(
                     context, dialogue, dom_level, task_type, previous_trajectory
@@ -450,14 +277,93 @@ Do NOT include meta-commentary or explanations of your reasoning.
             if tom_reasoning.temporal_trajectory:
                 previous_trajectory = tom_reasoning.temporal_trajectory
             
-            goal_achieved, reason, goal_status = self.goal_checker.check_tom_goal_achieved(
-                tom_reasoning, dialogue, task_type, required_info
-            )
+            # LLM 评估目标达成情况
+            ehr_input = context.get("input_text", "")
+            goal_prompt = f"""Evaluate if the medical consultation has achieved its goals:
+
+=== PATIENT EHR DATA ===
+{ehr_input}
+
+=== DIALOGUE HISTORY ===
+{format_dialogue_history(dialogue)}
+
+=== PATIENT'S MENTAL STATE ===
+Beliefs: {tom_reasoning.patient_mental_state.beliefs}
+Emotions: {tom_reasoning.patient_mental_state.emotions}
+Intentions: {tom_reasoning.patient_mental_state.intentions}
+Knowledge Gaps: {tom_reasoning.patient_mental_state.knowledge_gaps}
+
+=== TASK TYPE ===
+{task_type}
+
+Evaluate:
+1. Has the doctor gathered sufficient information?
+2. Have the patient's knowledge gaps been addressed?
+3. Have the patient's intentions been fulfilled?
+4. Is the patient's emotional state positive?
+5. Should the consultation conclude?
+
+OUTPUT:
+{
+    "goal_achieved": true/false,
+    "reason": "detailed explanation",
+    "goal_status": {
+        "doctor_info_complete": true/false,
+        "patient_gaps_covered": true/false,
+        "intentions_fulfilled": true/false,
+        "emotional_state_positive": true/false
+    }
+}
+"""
+            
+            goal_achieved = False
+            goal_status = {}
+            
+            try:
+                goal_response = self.llm_provider.generate_chat(
+                    messages=[{"role": "user", "content": goal_prompt}],
+                    max_tokens=300,
+                    temperature=0.3
+                )
+                goal_result = safe_json_loads(goal_response.content)
+                if goal_result:
+                    goal_achieved = goal_result.get("goal_achieved", False)
+                    goal_status = goal_result.get("goal_status", {})
+            except Exception as e:
+                logger.error(f"Goal achievement evaluation error: {e}")
             
             if goal_achieved:
-                doctor_response = self._generate_final_response(
-                    context, dialogue, tom_reasoning, task_type, goal_status
-                )
+                # LLM 生成最终响应
+                final_prompt = f"""Generate a final summary response for the medical consultation:
+
+=== PATIENT EHR DATA ===
+{ehr_input}
+
+=== DIALOGUE HISTORY ===
+{format_dialogue_history(dialogue)}
+
+=== PATIENT'S MENTAL STATE ===
+Beliefs: {tom_reasoning.patient_mental_state.beliefs}
+Emotions: {tom_reasoning.patient_mental_state.emotions}
+Intentions: {tom_reasoning.patient_mental_state.intentions}
+
+=== GOAL STATUS ===
+{json.dumps(goal_status, indent=2)}
+
+OUTPUT: Your final summary and recommendations to the patient (natural, empathetic, comprehensive)
+"""
+                
+                try:
+                    final_response = self.llm_provider.generate_chat(
+                        messages=[{"role": "user", "content": final_prompt}],
+                        max_tokens=500,
+                        temperature=0.5
+                    )
+                    doctor_response = final_response.content.strip()
+                except Exception as e:
+                    logger.error(f"Final response generation error: {e}")
+                    doctor_response = "Thank you for sharing your concerns. Based on our discussion, I have a clear understanding of your situation and will provide you with the appropriate recommendations."
+                
                 dialogue.append(DialogueTurn(
                     content=doctor_response,
                     role="assistant",
@@ -467,12 +373,10 @@ Do NOT include meta-commentary or explanations of your reasoning.
                 ))
                 break
             
+            # 生成医生响应
             doctor_response = self.generate_doctor_response_with_tom(
                 context, dialogue, tom_reasoning, task_type
             )
-            
-            if self._check_dialogue_repetition(dialogue, doctor_response, "assistant"):
-                logger.warning(f"Doctor response repetition detected at turn {turn_num}")
             
             dialogue.append(DialogueTurn(
                 content=doctor_response,
@@ -484,107 +388,75 @@ Do NOT include meta-commentary or explanations of your reasoning.
         
         return dialogue, tom_reasonings
     
-    def _generate_final_response(
-        self,
-        context: Dict[str, Any],
-        dialogue_history: List[DialogueTurn],
-        tom_reasoning: ToMReasoning,
-        task_type: str,
-        goal_status: Dict[str, Any]
-    ) -> str:
+
+    
+    def extract_disease_from_ehr(self, ehr_data: Dict) -> str:
+        """
+        使用 LLM 从 EHR 数据中提取疾病信息
+        """
+        input_text = ehr_data.get("input", "")
         
-        final_prompts = {
-            TaskType.DIAGNOSIS.value: "Based on our discussion and the information you've provided, here is my diagnosis and recommendation...",
-            TaskType.MEDRECON.value: "After reviewing your medications and discussing your concerns, here are my recommendations...",
-            TaskType.PRESCRIPTIONS.value: "Based on your diagnosis and our discussion, here are the prescriptions I recommend..."
-        }
-        
-        task_config = self.config.task_configs.get(task_type)
-        system_prompt = task_config.system_prompt if task_config else ""
-        
-        prompt = f"""{system_prompt}
+        prompt = f"""Extract the primary disease or chief complaint from the patient's EHR data:
 
-=== FINAL ToM SUMMARY ===
-Doctor's Known Info: {tom_reasoning.mental_boundary.doctor_known}
-Patient's Knowledge Gaps Addressed: {tom_reasoning.mental_boundary.patient_knowledge_gaps}
-Patient's Intentions Fulfilled: {tom_reasoning.patient_potential_intentions}
-Patient's Final Mental State:
-- Beliefs: {tom_reasoning.patient_mental_state.beliefs}
-- Emotions: {tom_reasoning.patient_mental_state.emotions}
-- Intentions: {tom_reasoning.patient_mental_state.intentions}
+=== EHR DATA ===
+{input_text}
 
-=== GOAL ACHIEVEMENT STATUS ===
-Doctor Info Complete: {goal_status.get('doctor_info_complete', False)} ({goal_status.get('doctor_completeness_score', 0):.0%})
-Patient Gaps Covered: {goal_status.get('patient_gaps_covered', False)} ({goal_status.get('patient_gap_coverage_score', 0):.0%})
-
-=== DIALOGUE HISTORY ===
-{format_dialogue_history(dialogue_history)}
-
-Generate a final response that:
-1. Provides clear diagnosis/medication reconciliation/prescription
-2. ADDRESSES all patient knowledge gaps identified
-3. RESPONDS to patient's emotions and intentions
-4. Shows empathy and ensures patient understanding
-5. Provides clear next steps
-
-Start with: {final_prompts.get(task_type, "Based on our discussion...")}
+Output only the primary disease or chief complaint, without any additional text.
 """
         
         try:
             response = self.llm_provider.generate_chat(
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=600,
-                temperature=0.5
+                max_tokens=100,
+                temperature=0.3
             )
-            return response.content.strip()
+            disease = response.content.strip()
+            return disease if disease else "Unknown Condition"
         except Exception as e:
-            logger.error(f"Final response generation error: {e}")
-            return final_prompts.get(task_type, "Thank you for the consultation.")
-    
-    def extract_disease_from_ehr(self, ehr_data: Dict) -> str:
-        input_text = ehr_data.get("input", "")
-        
-        discharge_dx_match = re.search(
-            r'Discharge Diagnosis:\s*Primary:\s*(.+?)(?:\n\n|\nSecondary:|\Z)', 
-            input_text, re.DOTALL
-        )
-        if discharge_dx_match:
-            diseases = discharge_dx_match.group(1).strip()
-            return diseases.split('\n')[0].strip()
-        
-        chief_match = re.search(r'Chiefcomplaint:\s*(.+?)(?:\n|$)', input_text)
-        if chief_match:
-            return chief_match.group(1).strip()
-        
-        return "Unknown Condition"
+            logger.error(f"Disease extraction error: {e}")
+            return "Unknown Condition"
     
     def determine_department(self, ehr_data: Dict, disease: str) -> Tuple[str, str]:
+        """
+        使用 LLM 基于疾病和 EHR 数据确定科室
+        """
         input_text = ehr_data.get("input", "")
         
-        service_match = re.search(r'Service:\s*(\w+)', input_text)
-        if service_match:
-            service = service_match.group(1)
-            department_map = {
-                "MEDICINE": ("Internal Medicine", "General Internal Medicine"),
-                "SURGERY": ("Surgery", "General Surgery"),
-                "ORTHOPAEDICS": ("Orthopedics", "Orthopedic Surgery"),
-                "NEUROSURGERY": ("Neurosurgery", "Neurological Surgery"),
-                "UROLOGY": ("Urology", "Urological Surgery"),
-                "PLASTIC": ("Plastic Surgery", "Reconstructive Surgery")
-            }
-            return department_map.get(service, ("General Medicine", "General Practice"))
+        prompt = f"""Based on the patient's disease and EHR data, determine the most appropriate medical department and subdepartment:
+
+=== PATIENT DISEASE ===
+{disease}
+
+=== EHR DATA ===
+{input_text}
+
+Output format:
+Department: [Main Department]
+Subdepartment: [Subdepartment]
+
+Example:
+Department: Cardiology
+Subdepartment: Cardiovascular Medicine
+"""
         
-        disease_lower = disease.lower()
-        if any(kw in disease_lower for kw in ['heart', 'cardiac', 'chest pain']):
-            return ("Cardiology", "Cardiovascular Medicine")
-        elif any(kw in disease_lower for kw in ['stomach', 'gastro', 'abdom']):
-            return ("Gastroenterology", "Digestive Diseases")
-        elif any(kw in disease_lower for kw in ['brain', 'neuro', 'headache']):
-            return ("Neurology", "Neurological Sciences")
-        elif any(kw in disease_lower for kw in ['respiratory', 'lung', 'breath']):
-            return ("Pulmonology", "Respiratory Medicine")
-        
-        return ("Internal Medicine", "General Internal Medicine")
+        try:
+            response = self.llm_provider.generate_chat(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=100,
+                temperature=0.3
+            )
+            
+            response_text = response.content.strip()
+            department_match = re.search(r'Department:\s*(.+?)\n', response_text)
+            subdepartment_match = re.search(r'Subdepartment:\s*(.+?)\n', response_text)
+            
+            if department_match and subdepartment_match:
+                return (department_match.group(1).strip(), subdepartment_match.group(1).strip())
+            else:
+                return ("Internal Medicine", "General Internal Medicine")
+        except Exception as e:
+            logger.error(f"Department determination error: {e}")
+            return ("Internal Medicine", "General Internal Medicine")
     
     def generate_single_sample(
         self,
@@ -592,15 +464,11 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
         task_type: str
     ) -> Optional[TargetFormat]:
         
-        patient_info = self.extract_patient_info(ehr_data)
-        
-        if task_type == TaskType.PRESCRIPTIONS.value:
-            patient_info["diagnosis"] = self.extract_disease_from_ehr(ehr_data)
-        
+        # 直接使用完整的 EHR 数据，不再手动提取患者信息
         self.tom_module.trajectory_history = []
         self.patient_simulator.response_history = []
         
-        dialogue, tom_reasonings = self.generate_dialogue_with_tom(patient_info, task_type)
+        dialogue, tom_reasonings = self.generate_dialogue_with_tom(ehr_data, task_type)
         
         if not dialogue:
             return None
@@ -655,7 +523,7 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
             task_types = [TaskType.DIAGNOSIS.value, TaskType.MEDRECON.value, TaskType.PRESCRIPTIONS.value]
         
         if delay is None:
-            delay = self.config.api.delay
+            delay = self.config.llm.delay
         
         with open_jsonl_files(output_dir, task_types) as output_files:
             with open(input_file, 'r', encoding='utf-8') as f:
@@ -700,6 +568,3 @@ Start with: {final_prompts.get(task_type, "Based on our discussion...")}
         logger.info(f"Output files saved to: {output_dir}")
         for task in task_types:
             logger.info(f"  - {task}_tom_dataset.jsonl")
-
-
-from config import Config

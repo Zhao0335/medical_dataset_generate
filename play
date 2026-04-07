@@ -1,0 +1,10 @@
+module load conda
+module load cuda/12.4
+
+source activate dataset
+
+nvidia-smi
+python -c "import torch; print('CUDA available:', torch.cuda.is_available()"
+
+cd $SLURM_SUBMIT_DIR
+python main.py --provider local --local_model_path ~/vllm/model --input ehr_bench_decision_making.jsonl --output ./output
